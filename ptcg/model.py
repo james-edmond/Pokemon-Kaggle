@@ -121,6 +121,13 @@ class PolicyModel(nn.Module):
         self.pd_head = nn.Linear(2 * cfg.d, 1)
         self.dl_head = nn.Linear(cfg.d, cfg.n_card_rows)
         self.hd_head = nn.Linear(cfg.d, cfg.n_card_rows)
+        # Zero-init the value heads' final linear layers so initial value
+        # predictions are exactly 0 and the first optimizer steps on the MSE
+        # terms cannot overshoot (standard RL value-head stabilization).
+        nn.init.zeros_(self.v_head[2].weight)
+        nn.init.zeros_(self.v_head[2].bias)
+        nn.init.zeros_(self.pd_head.weight)
+        nn.init.zeros_(self.pd_head.bias)
 
     def encode(self, state_batch):
         return self.encoder(state_batch)
@@ -212,6 +219,10 @@ class CriticModel(nn.Module):
         self.encoder = Encoder(cfg, attr_table)
         self.head = nn.Sequential(nn.Linear(2 * cfg.d, cfg.d), nn.GELU(),
                                   nn.Linear(cfg.d, 2), nn.Tanh())
+        # Zero-init the final linear (before Tanh) so initial values are
+        # exactly 0 and the first optimizer steps cannot overshoot.
+        nn.init.zeros_(self.head[2].weight)
+        nn.init.zeros_(self.head[2].bias)
 
     def forward(self, batch):
         h = self.encoder(batch)

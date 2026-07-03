@@ -33,6 +33,12 @@ def run_pick_loop(model, trunk, state_batch, sel_batch, *, forced=None, generato
         if int(a) == O:  # done
             break
         picks.append(int(a))
+        # Build a new tensor rather than mutating `picked` in place: the
+        # previous iteration's `option_logits` forward pass may have saved
+        # `picked` for backward (e.g. the `opt * picked[:, :O]` product in
+        # model.py), and an in-place write here would bump its version
+        # counter and break gradient tracking through that saved reference.
+        picked = picked.clone()
         picked[0, int(a)] = True
         step += 1
         if len(picks) == max_count:
