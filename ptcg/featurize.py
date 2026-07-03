@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .cards import PAD_ROW, CardTables, card_row
+from .cards import PAD_ROW, CardTables, attack_row, card_row
 from .tracker import BeliefSnapshot
 
 MAX_TOKENS = 192
@@ -256,3 +256,193 @@ def featurize_state(obs, me, own_deck, belief, tables) -> TokenizedState:
             s.numeric[row, F_SPLIT] = sv
 
     return b.s
+
+
+# ---- Task 5: option and query encoding -------------------------------------
+
+HASH_ROWS = 8
+N_SELECT_TYPE, N_SELECT_CTX, N_OPT_TYPE = 11 + HASH_ROWS, 49 + HASH_ROWS, 17 + HASH_ROWS
+OPT_SCALAR_DIM, Q_SCALAR_DIM = 4, 6
+
+# AreaType values referenced only here
+AREA_PRIZE = 6
+
+# OptionType values referenced here
+OPT_ENERGY, OPT_PLAY, OPT_ATTACK = 6, 7, 13
+
+
+@dataclass
+class EncodedSelect:
+    opt_type: np.ndarray    # [O] int64 (hash-bucketed OptionType)
+    opt_ref: np.ndarray     # [O] int64 token row, or -1
+    opt_card: np.ndarray    # [O] int64 card table row (0 when n/a)
+    opt_attack: np.ndarray  # [O] int64 attack table row (0 when n/a)
+    opt_scalar: np.ndarray  # [O, 4] float32: number/10, count/5, has_number, is_energy_unit
+    q_type: int             # hash-bucketed SelectType
+    q_ctx: int              # hash-bucketed SelectContext
+    q_scalar: np.ndarray    # [6] float32: min/5, max/5, remainEnergyCost/5,
+                            #   remainDamageCounter/10, has_deck_list, n_options/64
+    q_ref: np.ndarray       # [2] int64: contextCard row, effect row (or -1)
+    min_count: int
+    max_count: int
+
+
+def hash_id(v: int, known: int) -> int:
+    v = int(v) if v is not None else 0
+    return v if 0 <= v < known else known + (v % HASH_ROWS)
+
+
+def _owner_of(pi, obs) -> int:
+    me = obs["current"]["yourIndex"]
+    return OWNER_SELF if pi == me else OWNER_OPP
+
+
+def _card_id_at(opt: dict, obs: dict):
+    """Resolve the card id an option's (area, index, playerIndex) points at.
+
+    Walks, in order, guarded by bounds checks, returning None on any miss.
+    """
+    cur = obs["current"]
+    me = cur["yourIndex"]
+    area = opt.get("area")
+    idx = opt.get("index")
+    pi = opt.get("playerIndex")
+    if idx is None or not isinstance(idx, int) or idx < 0:
+        return None
+    select = obs.get("select") or {}
+
+    def _at(lst):
+        if lst is None or idx >= len(lst):
+            return None
+        entry = lst[idx]
+        return entry.get("id") if entry is not None else None
+
+    # (1) explicit deck listing (DECK / LOOKING contexts)
+    deck = select.get("deck")
+    if deck is not None and area in (AREA_DECK, AREA_LOOKING):
+        return _at(deck)
+    # (2) shared looking list
+    if area == AREA_LOOKING:
+        return _at(cur.get("looking"))
+    players = cur.get("players") or []
+    # (3) that player's discard
+    if area == AREA_DISCARD and pi is not None and 0 <= pi < len(players):
+        return _at(players[pi].get("discard"))
+    # (4) that player's prizes (may be face-down -> None)
+    if area == AREA_PRIZE and pi is not None and 0 <= pi < len(players):
+        return _at(players[pi].get("prize"))
+    # (5) own hand
+    if area == AREA_HAND and pi == me and 0 <= me < len(players):
+        return _at(players[me].get("hand"))
+    return None
+
+
+def _resolve(opt: dict, obs: dict, ts: TokenizedState, tables) -> tuple[int, int]:
+    """-> (token_row or -1, card table row)"""
+    pi, area, idx = opt.get("playerIndex"), opt.get("area"), opt.get("index")
+    for subkey, base in (("energyIndex", SUB_ENERGY), ("toolIndex", SUB_TOOL)):
+        if opt.get(subkey) is not None and (pi, area, idx, base + opt[subkey]) in ts.ref:
+            return ts.ref[(pi, area, idx, base + opt[subkey])], PAD_ROW
+    if (pi, area, idx, -1) in ts.ref:
+        return ts.ref[(pi, area, idx, -1)], PAD_ROW
+    cid = _card_id_at(opt, obs)          # walks select.deck / looking / zone lists
+    if cid is not None:
+        row = ts.mrow.get((_owner_of(pi, obs), area, cid), -1)
+        return row, card_row(cid, tables.n_rows)
+    return -1, PAD_ROW
+
+
+def _q_ref_row(card: dict, ts: TokenizedState, tables) -> int:
+    """Best-effort row for a context/effect card dict (no area/index available).
+
+    Match by card identity: compute this card's table row and scan the entity
+    token rows for the first match; if none, fall back to the known mrow zone
+    groups for that id; else -1. Never raises.
+    """
+    if not card:
+        return -1
+    cid = card.get("id")
+    if cid is None:
+        return -1
+    target = card_row(cid, tables.n_rows)
+    # scan real (non-pad) card token rows for identity match
+    for r in range(ts.n):
+        if int(ts.card[r]) == target:
+            return r
+    # fall back to multiset groups keyed by (owner, zone, cid)
+    for owner in (OWNER_SELF, OWNER_OPP):
+        for zone in (AREA_DECK, AREA_DISCARD, AREA_HAND):
+            row = ts.mrow.get((owner, zone, cid))
+            if row is not None:
+                return row
+    return -1
+
+
+def encode_select(obs: dict, ts: TokenizedState, tables: CardTables) -> EncodedSelect:
+    cur = obs["current"]
+    me = cur["yourIndex"]
+    select = obs.get("select") or {}
+    options = select.get("option") or []
+    o = len(options)
+
+    opt_type = np.zeros(o, np.int64)
+    opt_ref = np.full(o, -1, np.int64)
+    opt_card = np.full(o, PAD_ROW, np.int64)
+    opt_attack = np.full(o, PAD_ROW, np.int64)
+    opt_scalar = np.zeros((o, OPT_SCALAR_DIM), np.float32)
+
+    for i, opt in enumerate(options):
+        otype = opt.get("type")
+        opt_type[i] = hash_id(otype, 17)
+
+        ref, crow = -1, PAD_ROW
+        if otype == OPT_PLAY:
+            # PLAY index is into own hand
+            hand_key = (me, AREA_HAND, opt.get("index"), -1)
+            if hand_key in ts.ref:
+                ref = ts.ref[hand_key]
+                cid = _card_id_at({"area": AREA_HAND, "index": opt.get("index"),
+                                   "playerIndex": me}, obs)
+                if cid is not None:
+                    crow = card_row(cid, tables.n_rows)
+            else:
+                ref, crow = _resolve(
+                    {**opt, "area": AREA_HAND, "playerIndex": me}, obs, ts, tables)
+        else:
+            ref, crow = _resolve(opt, obs, ts, tables)
+
+        if otype == OPT_ATTACK:
+            opt_attack[i] = attack_row(opt.get("attackId"), tables)
+
+        opt_ref[i] = ref
+        opt_card[i] = crow
+
+        number = opt.get("number")
+        opt_scalar[i, 0] = (number / 10.0) if number is not None else 0.0
+        opt_scalar[i, 1] = (opt.get("count") or 0) / 5.0
+        opt_scalar[i, 2] = 1.0 if number is not None else 0.0
+        opt_scalar[i, 3] = 1.0 if otype == OPT_ENERGY else 0.0
+
+    q_type = hash_id(select.get("type"), 11)
+    q_ctx = hash_id(select.get("context"), 49)
+
+    min_count = int(select.get("minCount") or 0)
+    max_count = int(select.get("maxCount") or 0)
+    q_scalar = np.zeros(Q_SCALAR_DIM, np.float32)
+    q_scalar[0] = min_count / 5.0
+    q_scalar[1] = max_count / 5.0
+    q_scalar[2] = (select.get("remainEnergyCost") or 0) / 5.0
+    q_scalar[3] = (select.get("remainDamageCounter") or 0) / 10.0
+    q_scalar[4] = 1.0 if select.get("deck") is not None else 0.0
+    q_scalar[5] = o / 64.0
+
+    q_ref = np.array(
+        [_q_ref_row(select.get("contextCard"), ts, tables),
+         _q_ref_row(select.get("effect"), ts, tables)], np.int64)
+
+    return EncodedSelect(
+        opt_type=opt_type, opt_ref=opt_ref, opt_card=opt_card,
+        opt_attack=opt_attack, opt_scalar=opt_scalar,
+        q_type=q_type, q_ctx=q_ctx, q_scalar=q_scalar, q_ref=q_ref,
+        min_count=min_count, max_count=max_count,
+    )
