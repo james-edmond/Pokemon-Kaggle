@@ -9,6 +9,7 @@ dev = ["pytest>=8"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = ["ignore:enable_nested_tensor is True.*:UserWarning"]
 
 [build-system]
 requires = ["setuptools>=68"]

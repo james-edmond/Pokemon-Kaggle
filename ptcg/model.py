@@ -89,3 +89,113 @@ def collate_states(states):
         "pos": stack("pos", torch.int64),
         "mask": stack("mask", torch.bool),
     }
+
+
+class PolicyModel(nn.Module):
+    def __init__(self, cfg: ModelConfig, attr_table=None, attack_table=None):
+        super().__init__()
+        if attack_table is None:
+            from .cards import build_tables
+            t = build_tables()
+            attr_table, attack_table = t.attr, t.attack_feat
+        self.cfg = cfg
+        self.encoder = Encoder(cfg, attr_table)
+        self.register_buffer("atk", torch.from_numpy(attack_table))
+        self.opt_type = nn.Embedding(F.N_OPT_TYPE, cfg.d)
+        self.q_type = nn.Embedding(F.N_SELECT_TYPE, cfg.d)
+        self.q_ctx = nn.Embedding(F.N_SELECT_CTX, cfg.d)
+        self.atk_proj = nn.Linear(ATK_DIM, cfg.d)
+        self.opt_scalar = nn.Linear(F.OPT_SCALAR_DIM, cfg.d)
+        self.q_scalar = nn.Linear(F.Q_SCALAR_DIM, cfg.d)
+        self.picked_proj = nn.Linear(cfg.d, cfg.d)
+        self.done_tok = nn.Parameter(torch.zeros(cfg.d))
+        self.opt_norm = nn.LayerNorm(cfg.d)
+        dec = nn.TransformerDecoderLayer(
+            cfg.d, cfg.heads, cfg.ffn, dropout=cfg.dropout, activation="gelu",
+            batch_first=True, norm_first=True,
+        )
+        self.decoder = nn.TransformerDecoder(dec, cfg.dec_layers)
+        self.logit = nn.Linear(cfg.d, 1)
+        self.v_head = nn.Sequential(nn.Linear(2 * cfg.d, cfg.d), nn.GELU(),
+                                    nn.Linear(cfg.d, 1), nn.Tanh())
+        self.pd_head = nn.Linear(2 * cfg.d, 1)
+        self.dl_head = nn.Linear(cfg.d, cfg.n_card_rows)
+        self.hd_head = nn.Linear(cfg.d, cfg.n_card_rows)
+
+    def encode(self, state_batch):
+        return self.encoder(state_batch)
+
+    def _gather_ref(self, trunk, ref):
+        safe = ref.clamp(min=0)
+        g = torch.gather(trunk, 1, safe.unsqueeze(-1).expand(-1, -1, trunk.shape[-1]))
+        return g * (ref >= 0).unsqueeze(-1)
+
+    def option_logits(self, trunk, state_batch, sel, picked):
+        B, O = sel["opt_type"].shape
+        card_vec = self.encoder.card(sel["opt_card"])
+        opt = (self.opt_type(sel["opt_type"]) + card_vec
+               + self.atk_proj(self.atk[sel["opt_attack"]])
+               + self.opt_scalar(sel["opt_scalar"])
+               + self._gather_ref(trunk, sel["opt_ref"]))
+        q = (self.q_type(sel["q_type"]) + self.q_ctx(sel["q_ctx"])
+             + self.q_scalar(sel["q_scalar"])
+             + self._gather_ref(trunk, sel["q_ref"]).sum(1))
+        picked_sum = (opt * picked[:, :O].unsqueeze(-1)).sum(1)
+        q = q + self.picked_proj(picked_sum)
+        done = self.done_tok.expand(B, 1, -1)
+        tgt = self.opt_norm(torch.cat([q.unsqueeze(1), opt, done], dim=1))
+        h = self.decoder(tgt, trunk, memory_key_padding_mask=~state_batch["mask"])
+        logits = self.logit(h[:, 1:, :]).squeeze(-1)          # [B, O+1]
+        neg = float("-inf")
+        pad = ~sel["opt_mask"]
+        logits[:, :O] = logits[:, :O].masked_fill(pad | picked[:, :O], neg)
+        n_picked = picked[:, :O].sum(-1)
+        done_illegal = n_picked < sel["min_count_t"]
+        logits[:, O] = logits[:, O].masked_fill(done_illegal, neg)
+        return logits
+
+    def _pooled(self, trunk):
+        return torch.cat([trunk[:, VALUE_ROWS[0]], trunk[:, VALUE_ROWS[1]]], dim=-1)
+
+    def public_value(self, trunk):
+        return self.v_head(self._pooled(trunk)).squeeze(-1)
+
+    def prize_diff(self, trunk):
+        return self.pd_head(self._pooled(trunk)).squeeze(-1)
+
+    def aux_decklist(self, trunk):
+        return nn.functional.softplus(self.dl_head(trunk[:, 0]))
+
+    def aux_hand(self, trunk):
+        return nn.functional.softplus(self.hd_head(trunk[:, 0]))
+
+
+def collate_selects(selects, device=None):
+    B = len(selects)
+    O = max(len(s.opt_type) for s in selects)
+    out = {
+        "opt_type": torch.zeros(B, O, dtype=torch.int64),
+        "opt_ref": torch.full((B, O), -1, dtype=torch.int64),
+        "opt_card": torch.zeros(B, O, dtype=torch.int64),
+        "opt_attack": torch.zeros(B, O, dtype=torch.int64),
+        "opt_scalar": torch.zeros(B, O, F.OPT_SCALAR_DIM),
+        "opt_mask": torch.zeros(B, O, dtype=torch.bool),
+        "q_type": torch.zeros(B, dtype=torch.int64),
+        "q_ctx": torch.zeros(B, dtype=torch.int64),
+        "q_scalar": torch.zeros(B, F.Q_SCALAR_DIM),
+        "q_ref": torch.full((B, 2), -1, dtype=torch.int64),
+        "min_count_t": torch.zeros(B, dtype=torch.int64),
+        "max_count_t": torch.zeros(B, dtype=torch.int64),
+    }
+    for i, s in enumerate(selects):
+        o = len(s.opt_type)
+        for k, arr in (("opt_type", s.opt_type), ("opt_ref", s.opt_ref),
+                       ("opt_card", s.opt_card), ("opt_attack", s.opt_attack)):
+            out[k][i, :o] = torch.as_tensor(arr)
+        out["opt_scalar"][i, :o] = torch.as_tensor(s.opt_scalar)
+        out["opt_mask"][i, :o] = True
+        out["q_type"][i], out["q_ctx"][i] = s.q_type, s.q_ctx
+        out["q_scalar"][i] = torch.as_tensor(s.q_scalar)
+        out["q_ref"][i] = torch.as_tensor(s.q_ref)
+        out["min_count_t"][i], out["max_count_t"][i] = s.min_count, s.max_count
+    return out

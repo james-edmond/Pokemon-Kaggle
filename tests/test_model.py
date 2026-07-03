@@ -52,3 +52,46 @@ def test_teacher_param_count():
     tables, _ = _real_states(1)
     n = sum(p.numel() for p in Encoder(teacher_config(tables)).parameters())
     assert 20_000_000 < n < 32_000_000
+
+
+def test_option_logits_masking():
+    import numpy as np
+    from ptcg.featurize import encode_select, featurize_state
+    from ptcg.model import PolicyModel, collate_selects, collate_states, tiny_config
+    tables, states = _real_states(1)
+    # rebuild the matching select for the same obs — reuse helper game
+    import random
+    from ptcg.engine import BattleSession, load_sample_deck, random_picks
+    from ptcg.tracker import BeliefTracker
+    deck = load_sample_deck()
+    s = BattleSession(deck, list(deck))
+    try:
+        me = s.select_player
+        ts = featurize_state(s.obs, me, deck, BeliefTracker(me).snapshot(), tables)
+        es = encode_select(s.obs, ts, tables)
+    finally:
+        s.close()
+    m = PolicyModel(tiny_config(tables))
+    sb = collate_states([ts])
+    trunk = m.encode(sb)
+    selb = collate_selects([es])
+    o = len(es.opt_type)
+    picked = torch.zeros((1, o + 1), dtype=torch.bool)
+    logits = m.option_logits(trunk, sb, selb, picked)
+    assert logits.shape == (1, o + 1)
+    if es.min_count >= 1:
+        assert logits[0, o] == float("-inf")     # done illegal before min picks
+    picked[0, 0] = True
+    logits2 = m.option_logits(trunk, sb, selb, picked)
+    assert logits2[0, 0] == float("-inf")        # picked option masked
+
+
+def test_heads_shapes():
+    from ptcg.model import PolicyModel, collate_states, tiny_config
+    tables, states = _real_states(2)
+    m = PolicyModel(tiny_config(tables))
+    trunk = m.encode(collate_states(states))
+    assert m.public_value(trunk).shape == (2,)
+    assert m.public_value(trunk).abs().max() < 1.0
+    assert m.aux_decklist(trunk).shape == (2, tables.n_rows)
+    assert (m.aux_decklist(trunk) >= 0).all()
