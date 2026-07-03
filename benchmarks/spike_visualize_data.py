@@ -2,10 +2,11 @@
 import json
 import random
 from ptcg.engine import BattleSession, load_sample_deck, random_picks
-from cg.game import visualize_data
 
 deck = load_sample_deck()
 s = BattleSession(deck, list(deck))
+# cg is only on sys.path after the engine loads (BattleSession -> _load_game)
+from cg.game import visualize_data
 rng = random.Random(0)
 for _ in range(10):
     if s.done:

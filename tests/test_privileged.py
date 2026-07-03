@@ -1,10 +1,13 @@
+import json
 import random
 from ptcg.cards import build_tables
 from ptcg.engine import BattleSession, load_sample_deck, random_picks
-from ptcg.featurize import OWNER_OPP, featurize_privileged, featurize_state
+from ptcg.featurize import (
+    KIND_ENTITY, MAX_TOKENS, OWNER_OPP, featurize_privileged, featurize_state)
 from ptcg.tracker import BeliefTracker
 
 AREA_HAND_Z = 2  # AreaType.HAND, used as the zone id for hand tokens
+AREA_DECK_Z = 1  # AreaType.DECK, used as the zone id for deck tokens
 
 
 def test_privileged_sees_both_hands():
@@ -32,5 +35,43 @@ def test_privileged_sees_both_hands():
             i for i in range(pub.n)
             if pub.zone[i] == AREA_HAND_Z and pub.owner[i] == OWNER_OPP
         ] == []
+    finally:
+        s.close()
+
+
+def test_privileged_viz_exposes_opponent_deck_identities():
+    tables = build_tables()
+    deck = load_sample_deck()
+    s = BattleSession(deck, list(deck))
+    # cg is importable only once the engine has loaded (BattleSession above)
+    from cg.game import visualize_data
+    rng = random.Random(11)
+    try:
+        last = [None, None]
+        while not s.done and (last[0] is None or last[1] is None):
+            last[s.select_player] = s.obs
+            s.select(random_picks(s.obs, rng))
+        assert last[0] is not None and last[1] is not None
+        # viz is the latest VisualizeData snapshot's `current` dict
+        viz = json.loads(visualize_data())[-1]["current"]
+        decks = (deck, list(deck))
+        base = featurize_privileged(last[0], last[1], decks, tables)
+        pv = featurize_privileged(last[0], last[1], decks, tables, viz=viz)
+
+        # invariants: valid token state, within budget, mask consistent with n
+        for ts in (base, pv):
+            assert ts.n == int(ts.mask.sum()) <= MAX_TOKENS
+
+        def opp_deck_entities(ts):
+            return [
+                i for i in range(ts.n)
+                if ts.zone[i] == AREA_DECK_Z and ts.owner[i] == OWNER_OPP
+                and ts.kind[i] == KIND_ENTITY
+            ]
+
+        # viz exposes per-card opponent deck identities as entity tokens;
+        # the viz=None view has none (only aggregate multisets in that zone)
+        assert opp_deck_entities(base) == []
+        assert len(opp_deck_entities(pv)) > 0
     finally:
         s.close()
