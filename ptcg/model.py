@@ -199,3 +199,20 @@ def collate_selects(selects, device=None):
         out["q_ref"][i] = torch.as_tensor(s.q_ref)
         out["min_count_t"][i], out["max_count_t"][i] = s.min_count, s.max_count
     return out
+
+
+def critic_config(tables):
+    return ModelConfig(d=256, layers=4, heads=8, ffn=1024, dec_layers=0,
+                       n_card_rows=tables.n_rows, n_attack_rows=tables.n_attack_rows)
+
+
+class CriticModel(nn.Module):
+    def __init__(self, cfg: ModelConfig, attr_table=None):
+        super().__init__()
+        self.encoder = Encoder(cfg, attr_table)
+        self.head = nn.Sequential(nn.Linear(2 * cfg.d, cfg.d), nn.GELU(),
+                                  nn.Linear(cfg.d, 2), nn.Tanh())
+
+    def forward(self, batch):
+        h = self.encoder(batch)
+        return self.head(torch.cat([h[:, VALUE_ROWS[0]], h[:, VALUE_ROWS[1]]], -1))

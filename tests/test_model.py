@@ -95,3 +95,12 @@ def test_heads_shapes():
     assert m.public_value(trunk).abs().max() < 1.0
     assert m.aux_decklist(trunk).shape == (2, tables.n_rows)
     assert (m.aux_decklist(trunk) >= 0).all()
+
+
+def test_critic_two_player_values():
+    from ptcg.model import CriticModel, collate_states, critic_config
+    tables, states = _real_states(2)   # public states stand in; shapes identical
+    c = CriticModel(critic_config(tables))
+    v = c(collate_states(states))
+    assert v.shape == (2, 2)
+    assert v.abs().max() < 1.0
