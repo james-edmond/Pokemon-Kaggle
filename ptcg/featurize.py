@@ -446,3 +446,177 @@ def encode_select(obs: dict, ts: TokenizedState, tables: CardTables) -> EncodedS
         q_type=q_type, q_ctx=q_ctx, q_scalar=q_scalar, q_ref=q_ref,
         min_count=min_count, max_count=max_count,
     )
+
+
+# ---- Task 6: privileged (full-information) featurizer -----------------------
+
+
+def featurize_privileged(obs_a, obs_b, decks, tables, viz=None) -> TokenizedState:
+    """Full-information tokenization from seat-0's perspective (OWNER_SELF == seat 0,
+    OWNER_OPP == seat 1), built from BOTH seats' most recent observations of the same
+    state. Identical to ``featurize_state`` (me=0, shared state from ``obs_a``) except:
+      (a) seat 1's hand comes from ``obs_b`` and is emitted as opponent-owned HAND
+          entity tokens (ref keys ``(1, AREA_HAND, i, -1)``);
+      (b) BOTH players' deck∪prize unions are emitted as multisets, each computed from
+          THAT seat's own obs (obs_a for seat 0, obs_b for seat 1);
+      (c) no belief multisets.
+    ``obs_a`` is the reference for all shared board state; the two obs are each seat's
+    last-seen obs and may be from different moments (accepted for phase 1).
+
+    The spike (benchmarks/spike_visualize_data.py) found the engine's VisualizeData
+    DOES expose true deck order and prize identities. When ``viz`` (the parsed
+    VisualizeData last-snapshot ``current`` dict) is supplied, both players' ordered
+    deck cards and revealed prize cards are additionally emitted as owner-correct,
+    privileged entity tokens (droppable first under truncation).
+    """
+    b = _Builder(tables)
+    me, opp = 0, 1
+    cur = obs_a["current"]
+    players = cur["players"]
+    b_players = obs_b["current"]["players"]
+
+    # specials: 0 global, 1-2 player summaries, 3-4 value, 5-8 scratch
+    g = b.add(0, OWNER_NEUTRAL, Z_GLOBAL, KIND_SPECIAL)
+    psum_row = {}
+    for pi in (me, opp):
+        psum_row[pi] = b.add(
+            0, OWNER_SELF if pi == me else OWNER_OPP, Z_PSUM, KIND_SPECIAL)
+    for _ in range(2):
+        b.add(0, OWNER_NEUTRAL, Z_VALUE, KIND_SPECIAL)
+    for k in range(4):
+        b.add(0, OWNER_NEUTRAL, Z_SCRATCH, KIND_SPECIAL, pos=k)
+    num = b.s.numeric
+    num[g, F_TURN] = cur["turn"] / 50.0
+    num[g, F_SUPPORTER] = float(cur["supporterPlayed"])
+    num[g, F_STADIUMF] = float(cur["stadiumPlayed"])
+    num[g, F_ENERGYATT] = float(cur["energyAttached"])
+    num[g, F_RETREATED] = float(cur["retreated"])
+
+    # player summaries: deck/hand/prize counts into F_DECKN/F_HANDN/F_PRIZEN.
+    # seat 1's summary reflects obs_b (the seat where its own hand is visible).
+    for pi, src in ((me, players[me]), (opp, b_players[opp])):
+        r = psum_row[pi]
+        num[r, F_DECKN] = (src.get("deckCount") or 0) / 60.0
+        num[r, F_HANDN] = (src.get("handCount") or 0) / 10.0
+        num[r, F_PRIZEN] = len(src.get("prize") or []) / 6.0
+
+    # entities: per player active+bench via _add_pokemon (children inside).
+    # board state is shared -> taken from obs_a for both seats.
+    for pi in (me, opp):
+        pl = players[pi]
+        owner = OWNER_SELF if pi == me else OWNER_OPP
+        active_row = None
+        for i, pk in enumerate(pl.get("active") or []):
+            if pk is None:
+                continue
+            active_row = _add_pokemon(b, pk, owner, pi, AREA_ACTIVE, i)
+        for i, pk in enumerate(pl.get("bench") or []):
+            if pk is None:
+                continue
+            _add_pokemon(b, pk, owner, pi, AREA_BENCH, i)
+        if active_row is not None:
+            n = num[active_row]
+            n[F_POISON] = float(pl.get("poisoned") or False)
+            n[F_BURN] = float(pl.get("burned") or False)
+            n[F_ASLEEP] = float(pl.get("asleep") or False)
+            n[F_PARA] = float(pl.get("paralyzed") or False)
+            n[F_CONF] = float(pl.get("confused") or False)
+
+    # stadium: entity token(s), owner by the card's playerIndex vs seat 0
+    for i, c in enumerate(cur.get("stadium") or []):
+        if c is None:
+            continue
+        pidx = c.get("playerIndex")
+        owner = OWNER_SELF if pidx == me else OWNER_OPP
+        row = b.add(c["id"], owner, AREA_STADIUM, KIND_ENTITY, pos=i)
+        b.s.ref[(pidx, AREA_STADIUM, i, -1)] = row
+
+    # (a) both hands as entity tokens: seat 0 from obs_a, seat 1 from obs_b.
+    for i, c in enumerate(players[me].get("hand") or []):
+        if c is None:
+            continue
+        row = b.add(c["id"], OWNER_SELF, AREA_HAND, KIND_ENTITY, pos=i)
+        b.s.ref[(me, AREA_HAND, i, -1)] = row
+    for i, c in enumerate(b_players[opp].get("hand") or []):
+        if c is None:
+            continue
+        row = b.add(c["id"], OWNER_OPP, AREA_HAND, KIND_ENTITY, pos=i)
+        b.s.ref[(opp, AREA_HAND, i, -1)] = row
+
+    # looking tokens: entity tokens, owner self (shared state from obs_a)
+    looking = cur.get("looking")
+    if looking is not None:
+        for i, c in enumerate(looking):
+            if c is None:
+                continue
+            row = b.add(c["id"], OWNER_SELF, AREA_LOOKING, KIND_ENTITY, pos=i)
+            b.s.ref[(me, AREA_LOOKING, i, -1)] = row
+
+    # ---- multisets (droppable under truncation) --------------------------------
+    # (b) BOTH deck∪prize unions, each from that seat's own obs. (c) no belief.
+    self_union = _own_union(decks[me], obs_a, me)
+    opp_union = _own_union(decks[opp], obs_b, opp)
+    own_disc = Counter(c["id"] for c in players[me].get("discard") or [])
+    opp_disc = Counter(c["id"] for c in players[opp].get("discard") or [])
+
+    groups = [
+        (OWNER_SELF, AREA_DECK, self_union, F_COUNT, 0.25),
+        (OWNER_OPP, AREA_DECK, opp_union, F_COUNT, 0.25),
+        (OWNER_SELF, AREA_DISCARD, own_disc, F_COUNT, 0.25),
+        (OWNER_OPP, AREA_DISCARD, opp_disc, F_COUNT, 0.25),
+    ]
+
+    all_rows = []  # (count, owner, zone, cid, feat_slot, scale)
+    for owner, zone, counts, slot, scale in groups:
+        for cid, cnt in counts.items():
+            all_rows.append((cnt, owner, zone, cid, slot, scale))
+
+    # privileged entity tokens from VisualizeData: true deck order + revealed prizes.
+    # Emitted as owner-correct entity tokens, droppable first (lowest sort key).
+    viz_rows = []  # (owner, zone, cid, pos, ref_key)
+    if viz is not None:
+        viz_players = viz.get("players") or []
+        for pi in (me, opp):
+            if pi >= len(viz_players):
+                continue
+            owner = OWNER_SELF if pi == me else OWNER_OPP
+            for i, c in enumerate(viz_players[pi].get("deck") or []):
+                if c is None:
+                    continue
+                viz_rows.append((owner, AREA_DECK, c["id"], i, (pi, AREA_DECK, i, -1)))
+            for i, c in enumerate(viz_players[pi].get("prize") or []):
+                if c is None:
+                    continue
+                viz_rows.append((owner, AREA_PRIZE, c["id"], i, (pi, AREA_PRIZE, i, -1)))
+
+    fixed_n = b.s.n  # specials + entities + children + hands (never dropped)
+    budget = MAX_TOKENS - fixed_n
+    if budget < 0:
+        raise AssertionError(
+            f"non-droppable tokens ({fixed_n}) exceed MAX_TOKENS ({MAX_TOKENS})")
+
+    # droppable pool: privileged viz entities drop first (sort key 0), then
+    # multisets smallest-count first. total_ms drives the F_SPLIT fraction.
+    droppable = [(0, r) for r in viz_rows] + [(row[0], row) for row in all_rows]
+    total_ms = len(droppable)
+    if total_ms > budget:
+        droppable.sort(key=lambda x: x[0])  # ascending by count (viz first at 0)
+        kept = droppable[total_ms - budget:]
+        dropped = total_ms - budget
+        num[g, F_SPLIT] = dropped / total_ms if total_ms else 0.0
+    else:
+        kept = droppable
+
+    s = b.s
+    for sortkey, payload in kept:
+        if len(payload) == 5:  # viz entity token
+            owner, zone, cid, pos, ref_key = payload
+            row = b.add(cid, owner, zone, KIND_ENTITY, pos=pos)
+            s.ref[ref_key] = row
+        else:  # multiset row (cnt, owner, zone, cid, slot, scale)
+            cnt, owner, zone, cid, slot, scale = payload
+            row = b.add(cid, owner, zone, KIND_MULTISET)
+            s.mrow[(owner, zone, cid)] = row
+            s.numeric[row, slot] = cnt * scale
+
+    return b.s
