@@ -41,56 +41,53 @@ def test_privileged_sees_both_hands():
 
 
 def test_privileged_early_steps_source_unseen_hand_from_viz():
-    """Before a seat's first selection, its slot in last_obs holds the OTHER
-    seat's obs (hand=None). viz_hands must supply that seat's hand tokens and
-    remove the matching overcount from its deck∪prize union — exactly the
-    seeding play_game uses."""
+    """Before a seat's first selection its slot in last_obs holds the OTHER
+    seat's obs (hand=None) — rollout seeds last_obs = [s.obs, s.obs]. viz_hands
+    must supply that seat's hand tokens and remove the matching overcount from
+    its deck∪prize union. The seeding is reproduced directly here so the test
+    does not depend on which seat the engine happens to poll first."""
     tables = build_tables()
     deck = load_sample_deck()
     decks = (deck, list(deck))
     s = BattleSession(deck, list(deck))
     rng = random.Random(9)
     try:
-        last_obs = [s.obs, s.obs]
-        seen = [False, False]
         checked = False
         while not s.done and not checked:
             me = s.select_player
-            last_obs[me] = s.obs
-            seen[me] = True
-            if seen[0] != seen[1]:
-                unseen = seen.index(False)
-                vp = s.viz_current()["players"]
-                viz_hands = [vp[0].get("hand"), vp[1].get("hand")]
-                if viz_hands[unseen]:
-                    base = featurize_privileged(last_obs[0], last_obs[1],
-                                                decks, tables)
-                    pv = featurize_privileged(last_obs[0], last_obs[1], decks,
-                                              tables, viz_hands=viz_hands)
-                    owner = OWNER_SELF if unseen == 0 else OWNER_OPP
+            other = 1 - me
+            vp = s.viz_current()["players"]
+            viz_hands = [vp[0].get("hand"), vp[1].get("hand")]
+            if viz_hands[other]:
+                # exactly play_game's state before `other` has ever acted:
+                # both last_obs slots hold the current seat's obs
+                base = featurize_privileged(s.obs, s.obs, decks, tables)
+                pv = featurize_privileged(s.obs, s.obs, decks, tables,
+                                          viz_hands=viz_hands)
+                owner = OWNER_SELF if other == 0 else OWNER_OPP
 
-                    def hand_rows(ts):
-                        return [i for i in range(ts.n)
-                                if ts.zone[i] == AREA_HAND_Z
-                                and ts.owner[i] == owner
-                                and ts.kind[i] == KIND_ENTITY]
-
-                    def union_total(ts):
-                        return round(sum(
-                            float(ts.numeric[i, F_COUNT]) / 0.25
-                            for i in range(ts.n)
-                            if ts.zone[i] == AREA_DECK_Z
+                def hand_rows(ts):
+                    return [i for i in range(ts.n)
+                            if ts.zone[i] == AREA_HAND_Z
                             and ts.owner[i] == owner
-                            and ts.kind[i] == KIND_MULTISET))
+                            and ts.kind[i] == KIND_ENTITY]
 
-                    n_hand = len(viz_hands[unseen])
-                    assert hand_rows(base) == []          # the old, broken view
-                    assert len(hand_rows(pv)) == n_hand   # hand tokens present
-                    # union no longer overcounts by the unseen hand's size
-                    assert union_total(base) - union_total(pv) == n_hand
-                    checked = True
+                def union_total(ts):
+                    return round(sum(
+                        float(ts.numeric[i, F_COUNT]) / 0.25
+                        for i in range(ts.n)
+                        if ts.zone[i] == AREA_DECK_Z
+                        and ts.owner[i] == owner
+                        and ts.kind[i] == KIND_MULTISET))
+
+                n_hand = len(viz_hands[other])
+                assert hand_rows(base) == []          # the old, broken view
+                assert len(hand_rows(pv)) == n_hand   # hand tokens present
+                # union no longer overcounts by the unseen hand's size
+                assert union_total(base) - union_total(pv) == n_hand
+                checked = True
             s.select(random_picks(s.obs, rng))
-        assert checked, "never reached a one-seat-seen state with a dealt hand"
+        assert checked, "hands were never dealt before the game ended"
     finally:
         s.close()
 
