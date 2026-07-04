@@ -74,5 +74,5 @@ def test_ratio_is_one_and_gradients_flow():
         for name, p in list(m.named_parameters()) + list(critic.named_parameters()):
             assert p.grad is None or torch.isfinite(p.grad).all(), name
         opt.step()
-        losses.append(float(loss))
+        losses.append(float(loss.detach()))
     assert losses[-1] < losses[0], "loss should decrease when overfitting one batch"
