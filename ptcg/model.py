@@ -107,6 +107,9 @@ class PolicyModel(nn.Module):
         self.atk_proj = nn.Linear(ATK_DIM, cfg.d)
         self.opt_scalar = nn.Linear(F.OPT_SCALAR_DIM, cfg.d)
         self.q_scalar = nn.Linear(F.Q_SCALAR_DIM, cfg.d)
+        # role projection for an option's second (target) reference, so a
+        # source ref and a target ref pointing at the same token don't alias
+        self.ref2_proj = nn.Linear(cfg.d, cfg.d)
         self.picked_proj = nn.Linear(cfg.d, cfg.d)
         self.done_tok = nn.Parameter(torch.zeros(cfg.d))
         self.opt_norm = nn.LayerNorm(cfg.d)
@@ -140,10 +143,15 @@ class PolicyModel(nn.Module):
     def option_logits(self, trunk, state_batch, sel, picked):
         B, O = sel["opt_type"].shape
         card_vec = self.encoder.card(sel["opt_card"])
+        # mask ref2 AFTER the linear so absent (-1) refs contribute exact
+        # zeros (a bare Linear would leak its bias into every option)
+        ref2 = (self.ref2_proj(self._gather_ref(trunk, sel["opt_ref2"]))
+                * (sel["opt_ref2"] >= 0).unsqueeze(-1))
         opt = (self.opt_type(sel["opt_type"]) + card_vec
                + self.atk_proj(self.atk[sel["opt_attack"]])
                + self.opt_scalar(sel["opt_scalar"])
-               + self._gather_ref(trunk, sel["opt_ref"]))
+               + self._gather_ref(trunk, sel["opt_ref"])
+               + ref2)
         q = (self.q_type(sel["q_type"]) + self.q_ctx(sel["q_ctx"])
              + self.q_scalar(sel["q_scalar"])
              + self._gather_ref(trunk, sel["q_ref"]).sum(1))
@@ -183,6 +191,7 @@ def collate_selects(selects, device=None):
     out = {
         "opt_type": torch.zeros(B, O, dtype=torch.int64),
         "opt_ref": torch.full((B, O), -1, dtype=torch.int64),
+        "opt_ref2": torch.full((B, O), -1, dtype=torch.int64),
         "opt_card": torch.zeros(B, O, dtype=torch.int64),
         "opt_attack": torch.zeros(B, O, dtype=torch.int64),
         "opt_scalar": torch.zeros(B, O, F.OPT_SCALAR_DIM),
@@ -197,6 +206,7 @@ def collate_selects(selects, device=None):
     for i, s in enumerate(selects):
         o = len(s.opt_type)
         for k, arr in (("opt_type", s.opt_type), ("opt_ref", s.opt_ref),
+                       ("opt_ref2", s.opt_ref2),
                        ("opt_card", s.opt_card), ("opt_attack", s.opt_attack)):
             out[k][i, :o] = torch.as_tensor(arr)
         out["opt_scalar"][i, :o] = torch.as_tensor(s.opt_scalar)

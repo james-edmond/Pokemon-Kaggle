@@ -275,6 +275,7 @@ OPT_ENERGY, OPT_PLAY, OPT_ATTACK = 6, 7, 13
 class EncodedSelect:
     opt_type: np.ndarray    # [O] int64 (hash-bucketed OptionType)
     opt_ref: np.ndarray     # [O] int64 token row, or -1
+    opt_ref2: np.ndarray    # [O] int64 token row of inPlayArea/inPlayIndex target, or -1
     opt_card: np.ndarray    # [O] int64 card table row (0 when n/a)
     opt_attack: np.ndarray  # [O] int64 attack table row (0 when n/a)
     opt_scalar: np.ndarray  # [O, 4] float32: number/10, count/5, has_number, is_energy_unit
@@ -340,6 +341,12 @@ def _card_id_at(opt: dict, obs: dict):
 def _resolve(opt: dict, obs: dict, ts: TokenizedState, tables) -> tuple[int, int]:
     """-> (token_row or -1, card table row)"""
     pi, area, idx = opt.get("playerIndex"), opt.get("area"), opt.get("index")
+    if pi is None:
+        # ATTACH/EVOLVE/ABILITY/DISCARD options carry no playerIndex (cg/api.py
+        # OptionType doc comments); they always reference the SELECTING player's
+        # own cards, so default to the selecting seat.
+        pi = obs["current"]["yourIndex"]
+        opt = {**opt, "playerIndex": pi}
     for subkey, base in (("energyIndex", SUB_ENERGY), ("toolIndex", SUB_TOOL)):
         if opt.get(subkey) is not None and (pi, area, idx, base + opt[subkey]) in ts.ref:
             return ts.ref[(pi, area, idx, base + opt[subkey])], PAD_ROW
@@ -387,6 +394,7 @@ def encode_select(obs: dict, ts: TokenizedState, tables: CardTables) -> EncodedS
 
     opt_type = np.zeros(o, np.int64)
     opt_ref = np.full(o, -1, np.int64)
+    opt_ref2 = np.full(o, -1, np.int64)
     opt_card = np.full(o, PAD_ROW, np.int64)
     opt_attack = np.full(o, PAD_ROW, np.int64)
     opt_scalar = np.zeros((o, OPT_SCALAR_DIM), np.float32)
@@ -413,6 +421,11 @@ def encode_select(obs: dict, ts: TokenizedState, tables: CardTables) -> EncodedS
 
         if otype == OPT_ATTACK:
             opt_attack[i] = attack_row(opt.get("attackId"), tables)
+
+        # ATTACH/EVOLVE target: the selecting player's own in-play Pokémon
+        ipa, ipi = opt.get("inPlayArea"), opt.get("inPlayIndex")
+        if ipa is not None and ipi is not None:
+            opt_ref2[i] = ts.ref.get((me, ipa, ipi, -1), -1)
 
         opt_ref[i] = ref
         opt_card[i] = crow
@@ -441,7 +454,7 @@ def encode_select(obs: dict, ts: TokenizedState, tables: CardTables) -> EncodedS
          _q_ref_row(select.get("effect"), ts, tables)], np.int64)
 
     return EncodedSelect(
-        opt_type=opt_type, opt_ref=opt_ref, opt_card=opt_card,
+        opt_type=opt_type, opt_ref=opt_ref, opt_ref2=opt_ref2, opt_card=opt_card,
         opt_attack=opt_attack, opt_scalar=opt_scalar,
         q_type=q_type, q_ctx=q_ctx, q_scalar=q_scalar, q_ref=q_ref,
         min_count=min_count, max_count=max_count,
