@@ -3,7 +3,8 @@ import random
 from ptcg.cards import build_tables
 from ptcg.engine import BattleSession, load_sample_deck, random_picks
 from ptcg.featurize import (
-    KIND_ENTITY, MAX_TOKENS, OWNER_OPP, featurize_privileged, featurize_state)
+    F_COUNT, KIND_ENTITY, KIND_MULTISET, MAX_TOKENS, OWNER_OPP, OWNER_SELF,
+    featurize_privileged, featurize_state)
 from ptcg.tracker import BeliefTracker
 
 AREA_HAND_Z = 2  # AreaType.HAND, used as the zone id for hand tokens
@@ -35,6 +36,61 @@ def test_privileged_sees_both_hands():
             i for i in range(pub.n)
             if pub.zone[i] == AREA_HAND_Z and pub.owner[i] == OWNER_OPP
         ] == []
+    finally:
+        s.close()
+
+
+def test_privileged_early_steps_source_unseen_hand_from_viz():
+    """Before a seat's first selection, its slot in last_obs holds the OTHER
+    seat's obs (hand=None). viz_hands must supply that seat's hand tokens and
+    remove the matching overcount from its deck∪prize union — exactly the
+    seeding play_game uses."""
+    tables = build_tables()
+    deck = load_sample_deck()
+    decks = (deck, list(deck))
+    s = BattleSession(deck, list(deck))
+    rng = random.Random(9)
+    try:
+        last_obs = [s.obs, s.obs]
+        seen = [False, False]
+        checked = False
+        while not s.done and not checked:
+            me = s.select_player
+            last_obs[me] = s.obs
+            seen[me] = True
+            if seen[0] != seen[1]:
+                unseen = seen.index(False)
+                vp = s.viz_current()["players"]
+                viz_hands = [vp[0].get("hand"), vp[1].get("hand")]
+                if viz_hands[unseen]:
+                    base = featurize_privileged(last_obs[0], last_obs[1],
+                                                decks, tables)
+                    pv = featurize_privileged(last_obs[0], last_obs[1], decks,
+                                              tables, viz_hands=viz_hands)
+                    owner = OWNER_SELF if unseen == 0 else OWNER_OPP
+
+                    def hand_rows(ts):
+                        return [i for i in range(ts.n)
+                                if ts.zone[i] == AREA_HAND_Z
+                                and ts.owner[i] == owner
+                                and ts.kind[i] == KIND_ENTITY]
+
+                    def union_total(ts):
+                        return round(sum(
+                            float(ts.numeric[i, F_COUNT]) / 0.25
+                            for i in range(ts.n)
+                            if ts.zone[i] == AREA_DECK_Z
+                            and ts.owner[i] == owner
+                            and ts.kind[i] == KIND_MULTISET))
+
+                    n_hand = len(viz_hands[unseen])
+                    assert hand_rows(base) == []          # the old, broken view
+                    assert len(hand_rows(pv)) == n_hand   # hand tokens present
+                    # union no longer overcounts by the unseen hand's size
+                    assert union_total(base) - union_total(pv) == n_hand
+                    checked = True
+            s.select(random_picks(s.obs, rng))
+        assert checked, "never reached a one-seat-seen state with a dealt hand"
     finally:
         s.close()
 

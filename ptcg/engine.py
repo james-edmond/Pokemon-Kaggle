@@ -1,3 +1,4 @@
+import json
 import os
 import random
 import sys
@@ -72,6 +73,10 @@ class BattleSession:
     def select(self, picks: list[int]) -> dict:
         self.obs = self._g.battle_select(list(picks))
         return self.obs
+
+    def viz_current(self) -> dict:
+        """Latest VisualizeData snapshot's full-information `current` dict."""
+        return json.loads(self._g.visualize_data())[-1]["current"]
 
     def close(self) -> None:
         if BattleSession._open:

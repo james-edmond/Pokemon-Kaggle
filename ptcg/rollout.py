@@ -28,6 +28,7 @@ def play_game(model, decks, tables, generator=None, step_cap=5000):
     s = BattleSession(decks[0], decks[1])
     trackers = (BeliefTracker(0), BeliefTracker(1))
     last_obs = [s.obs, s.obs]
+    seen = [False, False]
     steps = []
     try:
         while not s.done:
@@ -35,10 +36,20 @@ def play_game(model, decks, tables, generator=None, step_cap=5000):
                 raise RuntimeError("step cap exceeded")
             me = s.select_player
             last_obs[me] = s.obs
+            seen[me] = True
             trackers[me].update(s.obs.get("logs", []))
             ts = featurize_state(s.obs, me, decks[me], trackers[me].snapshot(), tables)
             es = encode_select(s.obs, ts, tables)
-            pv = featurize_privileged(last_obs[0], last_obs[1], decks, tables)
+            # a seat that has not yet acted has no obs of its own: its slot in
+            # last_obs holds the other seat's obs, where its hand is None.
+            # Source that hand from the engine's full-information VisualizeData.
+            viz_hands = None
+            if not (seen[0] and seen[1]):
+                vp = s.viz_current().get("players") or []
+                if len(vp) == 2:
+                    viz_hands = [vp[0].get("hand"), vp[1].get("hand")]
+            pv = featurize_privileged(last_obs[0], last_obs[1], decks, tables,
+                                      viz_hands=viz_hands)
             d = sample_select(model, ts, es, generator)
             steps.append(Step(me, ts, es, d.picks, d.logprob, pv))
             s.select(d.picks)

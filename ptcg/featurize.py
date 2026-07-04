@@ -464,7 +464,8 @@ def encode_select(obs: dict, ts: TokenizedState, tables: CardTables) -> EncodedS
 # ---- Task 6: privileged (full-information) featurizer -----------------------
 
 
-def featurize_privileged(obs_a, obs_b, decks, tables, viz=None) -> TokenizedState:
+def featurize_privileged(obs_a, obs_b, decks, tables, viz=None,
+                         viz_hands=None) -> TokenizedState:
     """Full-information tokenization from seat-0's perspective (OWNER_SELF == seat 0,
     OWNER_OPP == seat 1), built from BOTH seats' most recent observations of the same
     state. Identical to ``featurize_state`` (me=0, shared state from ``obs_a``) except:
@@ -481,6 +482,12 @@ def featurize_privileged(obs_a, obs_b, decks, tables, viz=None) -> TokenizedStat
     VisualizeData last-snapshot ``current`` dict) is supplied, both players' ordered
     deck cards and revealed prize cards are additionally emitted as owner-correct,
     privileged entity tokens (droppable first under truncation).
+
+    ``viz_hands`` — optional pair of per-seat hand card lists sourced from
+    VisualizeData. A seat whose obs lacks its own hand (it has not made a
+    selection yet, so its slot holds the OTHER seat's obs where hand is None)
+    falls back to ``viz_hands[seat]`` for both its hand tokens and its
+    deck∪prize union subtraction. Pure data in, pure function out.
     """
     b = _Builder(tables)
     me, opp = 0, 1
@@ -544,17 +551,22 @@ def featurize_privileged(obs_a, obs_b, decks, tables, viz=None) -> TokenizedStat
         row = b.add(c["id"], owner, AREA_STADIUM, KIND_ENTITY, pos=i)
         b.s.ref[(pidx, AREA_STADIUM, i, -1)] = row
 
-    # (a) both hands as entity tokens: seat 0 from obs_a, seat 1 from obs_b.
-    for i, c in enumerate(players[me].get("hand") or []):
-        if c is None:
-            continue
-        row = b.add(c["id"], OWNER_SELF, AREA_HAND, KIND_ENTITY, pos=i)
-        b.s.ref[(me, AREA_HAND, i, -1)] = row
-    for i, c in enumerate(b_players[opp].get("hand") or []):
-        if c is None:
-            continue
-        row = b.add(c["id"], OWNER_OPP, AREA_HAND, KIND_ENTITY, pos=i)
-        b.s.ref[(opp, AREA_HAND, i, -1)] = row
+    # (a) both hands as entity tokens: seat 0 from obs_a, seat 1 from obs_b;
+    # a seat whose obs lacks its own hand falls back to viz_hands when given.
+    hands = [players[me].get("hand"), b_players[opp].get("hand")]
+    hand_from_viz = [False, False]
+    if viz_hands is not None:
+        for k in (me, opp):
+            if hands[k] is None and viz_hands[k] is not None:
+                hands[k] = viz_hands[k]
+                hand_from_viz[k] = True
+    for pi in (me, opp):
+        owner = OWNER_SELF if pi == me else OWNER_OPP
+        for i, c in enumerate(hands[pi] or []):
+            if c is None:
+                continue
+            row = b.add(c["id"], owner, AREA_HAND, KIND_ENTITY, pos=i)
+            b.s.ref[(pi, AREA_HAND, i, -1)] = row
 
     # looking tokens: entity tokens, owner self (shared state from obs_a)
     looking = cur.get("looking")
@@ -569,6 +581,14 @@ def featurize_privileged(obs_a, obs_b, decks, tables, viz=None) -> TokenizedStat
     # (b) BOTH deck∪prize unions, each from that seat's own obs. (c) no belief.
     self_union = _own_union(decks[me], obs_a, me)
     opp_union = _own_union(decks[opp], obs_b, opp)
+    # hands sourced from viz are invisible to _visible_own_ids (that seat's obs
+    # holds hand=None); subtract them here so the union is not overcounted.
+    if hand_from_viz[me]:
+        self_union.subtract(Counter(c["id"] for c in hands[me] if c is not None))
+        self_union = +self_union
+    if hand_from_viz[opp]:
+        opp_union.subtract(Counter(c["id"] for c in hands[opp] if c is not None))
+        opp_union = +opp_union
     own_disc = Counter(c["id"] for c in players[me].get("discard") or [])
     opp_disc = Counter(c["id"] for c in players[opp].get("discard") or [])
 
