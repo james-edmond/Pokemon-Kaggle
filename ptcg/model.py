@@ -164,7 +164,16 @@ class PolicyModel(nn.Module):
         q = q + self.picked_proj(picked_sum)
         done = self.done_tok.expand(B, 1, -1)
         tgt = self.opt_norm(torch.cat([q.unsqueeze(1), opt, done], dim=1))
-        h = self.decoder(tgt, trunk, memory_key_padding_mask=~state_batch["mask"])
+        # q (col 0) and done (last col) are never padding; only the O option
+        # columns can be, when this row's real option count < batch-wide O.
+        # Without this mask, decoder self-attention lets padded option slots
+        # leak into real option/q/done logits whenever the batch mixes
+        # option counts (never exercised until batched replay).
+        not_padded = torch.ones((B, 1), dtype=torch.bool, device=tgt.device)
+        tgt_key_padding_mask = torch.cat(
+            [not_padded, ~sel["opt_mask"], not_padded], dim=1)
+        h = self.decoder(tgt, trunk, memory_key_padding_mask=~state_batch["mask"],
+                          tgt_key_padding_mask=tgt_key_padding_mask)
         logits = self.logit(h[:, 1:, :]).squeeze(-1)          # [B, O+1]
         neg = float("-inf")
         pad = ~sel["opt_mask"]
