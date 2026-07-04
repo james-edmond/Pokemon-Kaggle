@@ -1,11 +1,19 @@
 from collections import Counter
 from dataclasses import dataclass
 
+LOG_DRAW_REVERSE = 5
 LOG_MOVE_CARD = 6
 LOG_MOVE_CARD_REVERSE = 7
+LOG_PLAY = 10
+LOG_ATTACH = 11
+LOG_EVOLVE = 12
 AREA_DECK = 1
 AREA_HAND = 2
 _HIDDEN = (AREA_DECK, AREA_HAND)
+# logs whose cardId names a card that left the player's hand (cg/api.py:
+# PLAY "Played a card from hand", ATTACH "Attached card ID", EVOLVE
+# "Evolved card ID"); the engine emits these WITHOUT a MOVE_CARD(fromArea=HAND)
+_FROM_HAND = (LOG_PLAY, LOG_ATTACH, LOG_EVOLVE)
 
 
 @dataclass(frozen=True)
@@ -49,6 +57,19 @@ class BeliefTracker:
                 if fr in _HIDDEN and to in _HIDDEN:
                     self._pool.update(self._zone(fr))
                     self._zone(fr).clear()
+            elif t in _FROM_HAND:
+                cid = lg.get("cardId")
+                if cid is None:
+                    continue
+                if self._hand[cid] > 0:
+                    self._hand[cid] -= 1
+                elif self._pool[cid] > 0:
+                    self._pool[cid] -= 1
+            elif t == LOG_DRAW_REVERSE:
+                # an unknown card moved deck -> hand: known-deck membership
+                # degrades to hand-or-deck membership (the hidden pool)
+                self._pool.update(self._deck)
+                self._deck.clear()
 
     def snapshot(self) -> BeliefSnapshot:
         return BeliefSnapshot(
