@@ -176,3 +176,7 @@ pyrightconfig.json
 # End of https://www.toptal.com/developers/gitignore/api/python
 
 pokemon-tcg-ai-battle/
+
+# Training pipeline (phase 2)
+venv-train/
+runs/
