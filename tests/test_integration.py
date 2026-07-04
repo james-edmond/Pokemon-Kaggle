@@ -1,6 +1,7 @@
 import torch
 from ptcg.cards import build_tables
 from ptcg.engine import load_sample_deck
+from ptcg.featurize import FEATURIZER_VERSION
 from ptcg.model import PolicyModel, tiny_config
 from ptcg.rollout import play_game
 
@@ -16,3 +17,4 @@ def test_untrained_model_plays_legal_games():
         assert 5 <= len(ep.steps) <= 1000
         assert all(s.logprob <= 0 and s.logprob == s.logprob for s in ep.steps)
         assert ep.rewards in ((1.0, -1.0), (-1.0, 1.0), (0.0, 0.0))
+        assert ep.featurizer_version == FEATURIZER_VERSION

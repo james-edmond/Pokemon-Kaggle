@@ -3,7 +3,8 @@ import random
 from ptcg.cards import build_tables
 from ptcg.engine import BattleSession, load_sample_deck, random_picks
 from ptcg.featurize import (
-    MAX_TOKENS, F_COUNT, KIND_CHILD, SUB_ENERGY, featurize_state,
+    MAX_TOKENS, F_COUNT, KIND_CHILD, SUB_ENERGY, Z_VALUE,
+    featurize_privileged, featurize_state,
 )
 from ptcg.tracker import BeliefTracker
 
@@ -44,6 +45,18 @@ def test_mini_obs_refs_and_children():
     child_row = ts.ref[(0, 4, 0, SUB_ENERGY + 0)]
     assert ts.kind[child_row] == KIND_CHILD
     assert ts.n == int(ts.mask.sum()) <= MAX_TOKENS
+
+
+def test_value_tokens_have_distinct_positions():
+    """Rows 3-4 are the two value readout tokens; identical embeddings would
+    make every value head's 2d input [x;x]. pos must tell them apart."""
+    tables = build_tables()
+    deck = load_sample_deck()
+    ts = featurize_state(_mini_obs(), 0, deck, BeliefTracker(0).snapshot(), tables)
+    pv = featurize_privileged(_mini_obs(0), _mini_obs(1), (deck, list(deck)), tables)
+    for t in (ts, pv):
+        assert t.zone[3] == t.zone[4] == Z_VALUE
+        assert t.pos[3] == 0 and t.pos[4] == 1
 
 
 def test_union_multiset_decrements():

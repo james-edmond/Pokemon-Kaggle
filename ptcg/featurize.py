@@ -6,6 +6,9 @@ import numpy as np
 from .cards import PAD_ROW, CardTables, attack_row, card_row
 from .tracker import BeliefSnapshot
 
+# bump whenever the tokenization/encoding changes; logged into trajectories
+FEATURIZER_VERSION = 1
+
 MAX_TOKENS = 192
 NUM_DIM = 40
 KIND_SPECIAL, KIND_ENTITY, KIND_CHILD, KIND_MULTISET = 0, 1, 2, 3
@@ -17,6 +20,7 @@ SUB_ENERGY, SUB_TOOL, SUB_PREEVO = 100, 200, 300
  F_APPEAR, F_ACTIVE, F_BENCHIX, F_DECKN, F_HANDN, F_PRIZEN, F_TURN,
  F_SUPPORTER, F_STADIUMF, F_ENERGYATT, F_RETREATED, F_SPLIT) = range(21)
 F_ENERGY0 = 21  # ..32
+F_TURNACT, F_FIRSTP = 33, 34  # global token: turnActionCount/10, firstPlayer==me
 
 # AreaType values reused as zones
 AREA_DECK, AREA_HAND, AREA_DISCARD = 1, 2, 3
@@ -86,10 +90,14 @@ def _add_pokemon(b, pk, owner, player_index, area, idx):
 
 def _visible_own_ids(obs, me):
     """Every own card id currently visible to `me`: hand, board (main + energy +
-    tools + pre-evolutions, active & bench), discard, own stadium, face-up prizes."""
+    tools + pre-evolutions, active & bench), discard, own stadium, face-up
+    prizes, own-owned looking cards."""
     cur = obs["current"]
     pl = cur["players"][me]
     ids = Counter()
+    for c in cur.get("looking") or []:
+        if c is not None and c.get("playerIndex") == me:
+            ids[c["id"]] += 1
     for c in pl.get("hand") or []:
         ids[c["id"]] += 1
     for area_key in ("active", "bench"):
@@ -129,8 +137,8 @@ def featurize_state(obs, me, own_deck, belief, tables) -> TokenizedState:
     for pi in (me, opp):
         psum_row[pi] = b.add(
             0, OWNER_SELF if pi == me else OWNER_OPP, Z_PSUM, KIND_SPECIAL)
-    for _ in range(2):
-        b.add(0, OWNER_NEUTRAL, Z_VALUE, KIND_SPECIAL)
+    for k in range(2):  # pos distinguishes the two value readout tokens
+        b.add(0, OWNER_NEUTRAL, Z_VALUE, KIND_SPECIAL, pos=k)
     for k in range(4):
         b.add(0, OWNER_NEUTRAL, Z_SCRATCH, KIND_SPECIAL, pos=k)
     num = b.s.numeric
@@ -139,6 +147,8 @@ def featurize_state(obs, me, own_deck, belief, tables) -> TokenizedState:
     num[g, F_STADIUMF] = float(cur["stadiumPlayed"])
     num[g, F_ENERGYATT] = float(cur["energyAttached"])
     num[g, F_RETREATED] = float(cur["retreated"])
+    num[g, F_TURNACT] = (cur.get("turnActionCount") or 0) / 10.0
+    num[g, F_FIRSTP] = float(cur.get("firstPlayer") == me)
 
     # player summaries: deck/hand/prize counts into F_DECKN/F_HANDN/F_PRIZEN
     for pi in (me, opp):
@@ -186,14 +196,20 @@ def featurize_state(obs, me, own_deck, belief, tables) -> TokenizedState:
         row = b.add(c["id"], OWNER_SELF, AREA_HAND, KIND_ENTITY, pos=i)
         b.s.ref[(me, AREA_HAND, i, -1)] = row
 
-    # looking tokens: entity tokens, owner self
+    # looking tokens: entity tokens, owner from the card's playerIndex. The
+    # (area, index) pair identifies the card regardless of playerIndex, so the
+    # ref is registered under both the viewer's and the true owner's key.
     looking = cur.get("looking")
     if looking is not None:
         for i, c in enumerate(looking):
             if c is None:
                 continue
-            row = b.add(c["id"], OWNER_SELF, AREA_LOOKING, KIND_ENTITY, pos=i)
+            pidx = c.get("playerIndex")
+            owner = OWNER_SELF if pidx == me else OWNER_OPP
+            row = b.add(c["id"], owner, AREA_LOOKING, KIND_ENTITY, pos=i)
             b.s.ref[(me, AREA_LOOKING, i, -1)] = row
+            if pidx is not None and pidx != me:
+                b.s.ref[(pidx, AREA_LOOKING, i, -1)] = row
 
     # ---- multisets (droppable under truncation) --------------------------------
     # own deck∪prizes union
@@ -501,8 +517,8 @@ def featurize_privileged(obs_a, obs_b, decks, tables, viz=None,
     for pi in (me, opp):
         psum_row[pi] = b.add(
             0, OWNER_SELF if pi == me else OWNER_OPP, Z_PSUM, KIND_SPECIAL)
-    for _ in range(2):
-        b.add(0, OWNER_NEUTRAL, Z_VALUE, KIND_SPECIAL)
+    for k in range(2):  # pos distinguishes the two value readout tokens
+        b.add(0, OWNER_NEUTRAL, Z_VALUE, KIND_SPECIAL, pos=k)
     for k in range(4):
         b.add(0, OWNER_NEUTRAL, Z_SCRATCH, KIND_SPECIAL, pos=k)
     num = b.s.numeric
@@ -511,6 +527,8 @@ def featurize_privileged(obs_a, obs_b, decks, tables, viz=None,
     num[g, F_STADIUMF] = float(cur["stadiumPlayed"])
     num[g, F_ENERGYATT] = float(cur["energyAttached"])
     num[g, F_RETREATED] = float(cur["retreated"])
+    num[g, F_TURNACT] = (cur.get("turnActionCount") or 0) / 10.0
+    num[g, F_FIRSTP] = float(cur.get("firstPlayer") == me)
 
     # player summaries: deck/hand/prize counts into F_DECKN/F_HANDN/F_PRIZEN.
     # seat 1's summary reflects obs_b (the seat where its own hand is visible).
@@ -568,14 +586,19 @@ def featurize_privileged(obs_a, obs_b, decks, tables, viz=None,
             row = b.add(c["id"], owner, AREA_HAND, KIND_ENTITY, pos=i)
             b.s.ref[(pi, AREA_HAND, i, -1)] = row
 
-    # looking tokens: entity tokens, owner self (shared state from obs_a)
+    # looking tokens (shared state from obs_a): owner from the card's
+    # playerIndex; ref registered under both seats' keys (see featurize_state)
     looking = cur.get("looking")
     if looking is not None:
         for i, c in enumerate(looking):
             if c is None:
                 continue
-            row = b.add(c["id"], OWNER_SELF, AREA_LOOKING, KIND_ENTITY, pos=i)
+            pidx = c.get("playerIndex")
+            owner = OWNER_SELF if pidx == me else OWNER_OPP
+            row = b.add(c["id"], owner, AREA_LOOKING, KIND_ENTITY, pos=i)
             b.s.ref[(me, AREA_LOOKING, i, -1)] = row
+            if pidx is not None and pidx != me:
+                b.s.ref[(pidx, AREA_LOOKING, i, -1)] = row
 
     # ---- multisets (droppable under truncation) --------------------------------
     # (b) BOTH deck∪prize unions, each from that seat's own obs. (c) no belief.

@@ -2,8 +2,8 @@ from dataclasses import dataclass
 
 from .action import SelectDecision, sample_select
 from .engine import BattleSession
-from .featurize import (EncodedSelect, TokenizedState, encode_select,
-                        featurize_privileged, featurize_state)
+from .featurize import (FEATURIZER_VERSION, EncodedSelect, TokenizedState,
+                        encode_select, featurize_privileged, featurize_state)
 from .tracker import BeliefTracker
 
 
@@ -22,6 +22,7 @@ class Episode:
     steps: list
     result: int
     rewards: tuple
+    featurizer_version: int = FEATURIZER_VERSION
 
 
 def play_game(model, decks, tables, generator=None, step_cap=5000):

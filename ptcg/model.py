@@ -105,6 +105,10 @@ class PolicyModel(nn.Module):
         self.q_type = nn.Embedding(F.N_SELECT_TYPE, cfg.d)
         self.q_ctx = nn.Embedding(F.N_SELECT_CTX, cfg.d)
         self.atk_proj = nn.Linear(ATK_DIM, cfg.d)
+        # attack identity (spec: attackId -> attack embedding); printed stats
+        # alone would alias same-stat attacks. padding_idx=0 keeps non-attack
+        # options (PAD row) at zero contribution.
+        self.atk_emb = nn.Embedding(cfg.n_attack_rows, cfg.d, padding_idx=0)
         self.opt_scalar = nn.Linear(F.OPT_SCALAR_DIM, cfg.d)
         self.q_scalar = nn.Linear(F.Q_SCALAR_DIM, cfg.d)
         # role projection for an option's second (target) reference, so a
@@ -149,6 +153,7 @@ class PolicyModel(nn.Module):
                 * (sel["opt_ref2"] >= 0).unsqueeze(-1))
         opt = (self.opt_type(sel["opt_type"]) + card_vec
                + self.atk_proj(self.atk[sel["opt_attack"]])
+               + self.atk_emb(sel["opt_attack"])
                + self.opt_scalar(sel["opt_scalar"])
                + self._gather_ref(trunk, sel["opt_ref"])
                + ref2)
