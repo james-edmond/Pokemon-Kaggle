@@ -192,3 +192,100 @@ def learner_update(policy, critic, optim, episodes, cfg, tables, opp_deck):
     out = {k: v / max(n_mb, 1) for k, v in agg.items()}
     out.update(epochs_ran=epochs_ran, ratio_drift=ratio_drift, steps=B)
     return out
+
+
+import csv
+import shutil
+
+METRIC_FIELDS = ["round", "kind", "games", "steps", "loss_pg", "loss_v",
+                 "loss_critic", "loss_aux", "entropy", "approx_kl",
+                 "epochs_ran", "ratio_drift", "wr_random", "ci_random",
+                 "wr_ck5", "wr_ck15", "mean_len", "wall_s"]
+
+
+def _metrics_path(cfg):
+    return Path(cfg.run_dir) / "metrics.csv"
+
+
+def append_metrics(cfg, row):
+    p = _metrics_path(cfg)
+    new = not p.exists()
+    with open(p, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=METRIC_FIELDS)
+        if new:
+            w.writeheader()
+        w.writerow({k: row.get(k, "") for k in METRIC_FIELDS})
+
+
+def read_metrics(cfg):
+    p = _metrics_path(cfg)
+    if not p.exists():
+        return []
+    with open(p, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def truncate_metrics(cfg, before_round):
+    rows = [r for r in read_metrics(cfg) if int(r["round"]) < before_round]
+    p = _metrics_path(cfg)
+    with open(p, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=METRIC_FIELDS)
+        w.writeheader()
+        w.writerows(rows)
+
+
+def _eval_due(cfg, round_n, policy, tables):
+    return None  # wired in Task 8
+
+
+def train(cfg, max_rounds):
+    import time as _time
+
+    from .actors import run_actor_pool
+    from .cards import build_tables
+    from .engine import load_sample_deck
+
+    tables = build_tables()
+    deck = load_sample_deck()
+    Path(cfg.run_dir).mkdir(parents=True, exist_ok=True)
+    policy = PolicyModel(model_config_for(cfg.model_size, tables))
+    critic = CriticModel(critic_config(tables))
+    optim = torch.optim.Adam(
+        list(policy.parameters()) + list(critic.parameters()), lr=cfg.lr)
+
+    latest = latest_checkpoint(cfg)
+    if latest is None:
+        torch.manual_seed(cfg.seed)
+        with open(Path(cfg.run_dir) / "config.json", "w") as f:
+            json.dump(asdict(cfg), f, indent=1)
+        save_checkpoint(cfg, 0, policy, critic, optim)
+        start = 0
+    else:
+        start = load_checkpoint(latest[1], policy, critic, optim)
+        truncate_metrics(cfg, start)
+        rd = round_dir(cfg, start)
+        if rd.exists():
+            shutil.rmtree(rd)  # incomplete round from a crash
+
+    for rnd in range(start, max_rounds):
+        t0 = _time.perf_counter()
+        ck = checkpoint_path(cfg, rnd)
+        stats = run_actor_pool(cfg, rnd, ck)
+        episodes = load_round(cfg, rnd)
+        policy.train()
+        critic.train()
+        m = learner_update(policy, critic, optim, episodes, cfg, tables, deck)
+        policy.eval()
+        critic.eval()
+        save_checkpoint(cfg, rnd + 1, policy, critic, optim)
+        n_steps = sum(s["steps"] for s in stats)
+        mean_len = n_steps / max(sum(s["games"] for s in stats), 1)
+        append_metrics(cfg, dict(
+            round=rnd, kind="train", games=sum(s["games"] for s in stats),
+            mean_len=f"{mean_len:.1f}", wall_s=f"{_time.perf_counter() - t0:.0f}",
+            **{k: (f"{v:.6g}" if isinstance(v, float) else v)
+               for k, v in m.items()}))
+        shutil.rmtree(round_dir(cfg, rnd), ignore_errors=True)
+        ev = _eval_due(cfg, rnd, policy, tables)
+        if ev is not None:
+            append_metrics(cfg, ev)

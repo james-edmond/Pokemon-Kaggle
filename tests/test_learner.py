@@ -30,6 +30,22 @@ def test_learner_update_ratio_gate_and_metrics():
                for a, b in zip(before, policy.parameters()))
 
 
+def test_learner_update_kl_early_stop():
+    tables = build_tables()
+    deck = load_sample_deck()
+    policy = PolicyModel(tiny_config(tables))
+    critic = CriticModel(critic_config(tables))
+    optim = torch.optim.Adam(
+        list(policy.parameters()) + list(critic.parameters()), lr=3e-4)
+    g = torch.Generator().manual_seed(6)
+    eps = [play_game(policy, (deck, list(deck)), tables, generator=g,
+                     priv_viz=True) for _ in range(1)]
+    cfg = TrainConfig(run_dir="unused", model_size="tiny", epochs=2,
+                      minibatch=64, device="cpu", kl_stop=-1e9)
+    m = learner_update(policy, critic, optim, eps, cfg, tables, deck)
+    assert m["epochs_ran"] == 1
+
+
 def test_learner_update_aborts_on_stale_policy():
     tables = build_tables()
     deck = load_sample_deck()
