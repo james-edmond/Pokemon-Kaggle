@@ -27,9 +27,10 @@ def test_batched_matches_b1_exactly():
     lp1 = replay_logprob(m, states, sels, picks)
     lpb, entb = replay_logprob_batched(m, states, sels, picks)
     # Decision rule (task-1 brief): batched vs single-row CPU GEMM kernels can
-    # differ in the last float bits. Measured max abs diff here is ~2.4e-7,
-    # well under the 1e-6 tolerance and with no structural mismatch, so this
-    # one assertion is relaxed to atol=1e-6 per the brief's rule.
+    # differ in the last float bits. Measured max abs diffs with the corrected
+    # tgt padding mask: logp 2.384e-7, entropy 2.384e-7 — under the 1e-6
+    # tolerance with no structural mismatch, so these assertions are relaxed
+    # to atol=1e-6 per the brief's rule.
     assert torch.allclose(lpb, lp1, atol=1e-6, rtol=0), (lpb - lp1).abs().max()
     # entropy reference via the B==1 forced loop
     ents = []
@@ -40,6 +41,39 @@ def test_batched_matches_b1_exactly():
         _, _, ent = run_pick_loop(m, trunk, sb, selb, forced=list(s.picks))
         ents.append(ent)
     assert torch.allclose(entb, torch.stack(ents), atol=1e-6, rtol=0)
+
+
+def test_option_logits_query_and_picked_sensitivity():
+    # Regression for the tgt_key_padding_mask polarity bug: True means
+    # IGNORE as a self-attention key, so flagging the q/done columns True
+    # silently severed query and picked conditioning (the deltas below were
+    # exactly 0.0) while every behavioral test stayed green. These
+    # assertions pin the conditioning paths open.
+    import copy
+    tables, m, steps = _collect_steps()
+    step = next(s for s in steps if len(s.esel.opt_type) >= 2)
+    sb = collate_states([step.state])
+    selb = collate_selects([step.esel])
+    O = selb["opt_type"].shape[1]
+    picked = torch.zeros((1, O + 1), dtype=torch.bool)
+    with torch.no_grad():
+        trunk = m.encode(sb)
+        base = m.option_logits(trunk, sb, selb, picked)
+        # (a) query conditioning: perturbing q_scalar before collation must
+        # move the option logits
+        es2 = copy.deepcopy(step.esel)
+        es2.q_scalar = es2.q_scalar + 1.0
+        pert = m.option_logits(trunk, sb, collate_selects([es2]), picked)
+        fin = torch.isfinite(base) & torch.isfinite(pert)
+        assert (pert[fin] - base[fin]).abs().max() > 0
+        # (b) picked conditioning: setting one picked bit must move at least
+        # one OTHER column's logit (the picked column itself just goes -inf)
+        picked2 = picked.clone()
+        picked2[0, 0] = True
+        after = m.option_logits(trunk, sb, selb, picked2)
+        f2 = torch.isfinite(base[0, 1:O]) & torch.isfinite(after[0, 1:O])
+        assert f2.any()
+        assert (after[0, 1:O][f2] - base[0, 1:O][f2]).abs().max() > 0
 
 
 def test_batched_replay_backward():

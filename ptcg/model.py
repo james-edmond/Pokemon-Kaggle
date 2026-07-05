@@ -169,7 +169,10 @@ class PolicyModel(nn.Module):
         # Without this mask, decoder self-attention lets padded option slots
         # leak into real option/q/done logits whenever the batch mixes
         # option counts (never exercised until batched replay).
-        not_padded = torch.ones((B, 1), dtype=torch.bool, device=tgt.device)
+        # POLARITY: True in tgt_key_padding_mask means IGNORE as a key, so
+        # the never-padding q/done columns must be False — True there would
+        # sever query/picked conditioning (q, done dropped from self-attn).
+        not_padded = torch.zeros((B, 1), dtype=torch.bool, device=tgt.device)
         tgt_key_padding_mask = torch.cat(
             [not_padded, ~sel["opt_mask"], not_padded], dim=1)
         h = self.decoder(tgt, trunk, memory_key_padding_mask=~state_batch["mask"],
