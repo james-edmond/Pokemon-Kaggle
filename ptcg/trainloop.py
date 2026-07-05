@@ -104,6 +104,28 @@ def latest_checkpoint(cfg):
     return best
 
 
+def prune_checkpoints(cfg, current_round) -> list[str]:
+    """Delete checkpoints that are not round 0, not multiples of cfg.eval_every
+    (eval reference candidates), and not one of the two most recent. Returns
+    deleted filenames."""
+    ckpts = []
+    for f in Path(cfg.run_dir).glob("checkpoint-*.pt"):
+        try:
+            n = int(f.stem.split("-")[1])
+        except (IndexError, ValueError):
+            continue
+        if n <= current_round + 1:  # never touch anything newer than now
+            ckpts.append((n, f))
+    recent = set(sorted(n for n, _ in ckpts)[-2:])  # two most recent
+    deleted = []
+    for n, f in sorted(ckpts):
+        if n == 0 or n % cfg.eval_every == 0 or n in recent:
+            continue
+        f.unlink()
+        deleted.append(f.name)
+    return sorted(deleted)
+
+
 def learner_update(policy, critic, optim, episodes, cfg, tables, opp_deck):
     import torch as _t
     from .model import collate_selects, collate_states
@@ -309,6 +331,7 @@ def train(cfg, max_rounds):
             mean_len=f"{mean_len:.1f}", wall_s=f"{_time.perf_counter() - t0:.0f}",
             **{k: (f"{v:.6g}" if isinstance(v, float) else v)
                for k, v in m.items()}))
+        prune_checkpoints(cfg, rnd)
         shutil.rmtree(round_dir(cfg, rnd), ignore_errors=True)
         ev = _eval_due(cfg, rnd, policy, tables)
         if ev is not None:

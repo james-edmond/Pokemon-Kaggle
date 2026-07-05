@@ -4,8 +4,8 @@ from ptcg.engine import load_sample_deck
 from ptcg.model import CriticModel, PolicyModel, critic_config, tiny_config
 from ptcg.rollout import play_game
 from ptcg.trainloop import (TrainConfig, checkpoint_path, latest_checkpoint,
-                            load_checkpoint, load_round, round_dir, save_checkpoint,
-                            save_game)
+                            load_checkpoint, load_round, prune_checkpoints,
+                            round_dir, save_checkpoint, save_game)
 
 
 def test_game_roundtrip(tmp_path):
@@ -44,3 +44,20 @@ def test_checkpoint_roundtrip_and_latest(tmp_path):
     assert load_checkpoint(path, p2, c2, opt2) == 3
     for a, b in zip(p.state_dict().values(), p2.state_dict().values()):
         assert torch.equal(a, b)
+
+
+def test_prune_checkpoints_retention_and_idempotence(tmp_path):
+    cfg = TrainConfig(run_dir=str(tmp_path), eval_every=5)
+    for n in range(13):  # checkpoint-0000 .. checkpoint-0012
+        checkpoint_path(cfg, n).write_bytes(b"")
+    deleted = prune_checkpoints(cfg, current_round=12)
+    survivors = {int(f.stem.split("-")[1])
+                 for f in tmp_path.glob("checkpoint-*.pt")}
+    assert survivors == {0, 5, 10, 11, 12}
+    assert set(deleted) == {f"checkpoint-{n:04d}.pt"
+                            for n in (1, 2, 3, 4, 6, 7, 8, 9)}
+    # idempotent: a second prune deletes nothing and leaves the same survivors
+    assert prune_checkpoints(cfg, current_round=12) == []
+    survivors2 = {int(f.stem.split("-")[1])
+                  for f in tmp_path.glob("checkpoint-*.pt")}
+    assert survivors2 == {0, 5, 10, 11, 12}
