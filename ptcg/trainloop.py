@@ -294,11 +294,16 @@ def train(cfg, max_rounds):
     tables = build_tables()
     deck = load_sample_deck()
     Path(cfg.run_dir).mkdir(parents=True, exist_ok=True)
-    policy = PolicyModel(model_config_for(cfg.model_size, tables))
-    critic = CriticModel(critic_config(tables))
+    policy = PolicyModel(model_config_for(cfg.model_size, tables)).to(cfg.device)
+    critic = CriticModel(critic_config(tables)).to(cfg.device)
     optim = torch.optim.Adam(
         list(policy.parameters()) + list(critic.parameters()), lr=cfg.lr)
 
+    # Params live on cfg.device before any checkpoint load so that
+    # optim.load_state_dict casts the restored Adam state (exp_avg/exp_avg_sq)
+    # onto the params' device automatically; step counters stay on CPU as
+    # torch manages non-capturable state_steps. This makes the .to(device)
+    # calls inside learner_update idempotent no-ops on resume.
     latest = latest_checkpoint(cfg)
     if latest is None:
         torch.manual_seed(cfg.seed)
