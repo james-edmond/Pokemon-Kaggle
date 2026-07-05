@@ -235,7 +235,31 @@ def truncate_metrics(cfg, before_round):
 
 
 def _eval_due(cfg, round_n, policy, tables):
-    return None  # wired in Task 8
+    if (round_n + 1) % cfg.eval_every != 0:
+        return None
+    import math
+
+    from .actors import eval_worker, run_actor_pool
+    ck = checkpoint_path(cfg, round_n + 1)
+    row = {"round": round_n, "kind": "eval"}
+
+    def _run(n_games, opp_spec):
+        sub = TrainConfig(**{**asdict(cfg), "games_per_round": n_games})
+        stats = run_actor_pool(sub, round_n, ck, worker=eval_worker,
+                               extra=(opp_spec,))
+        wins = sum(s["wins"] for s in stats)
+        games = sum(s["games"] for s in stats)
+        return wins / max(games, 1), games
+
+    wr, n = _run(cfg.eval_games_random, "random")
+    row["wr_random"] = f"{wr:.3f}"
+    row["ci_random"] = f"{1.96 * math.sqrt(max(wr * (1 - wr), 1e-9) / max(n, 1)):.3f}"
+    for label, back in (("wr_ck5", 5), ("wr_ck15", 15)):
+        ref = checkpoint_path(cfg, round_n + 1 - back)
+        if ref.exists():
+            wr, _ = _run(cfg.eval_games_ckpt, str(ref))
+            row[label] = f"{wr:.3f}"
+    return row
 
 
 def train(cfg, max_rounds):
