@@ -174,3 +174,27 @@ def eval_worker(args):
         wins += play_versus(policy, opponent, tables, (deck, list(deck)),
                             gen, model_seat=g % 2, step_cap=cfg.step_cap)
     return {"wins": wins, "games": n_games}
+
+
+def league_eval_worker(args):
+    from .decks import deck as get_deck
+    cfg_json, round_n, actor_idx, n_games, ckpt_path, opp_spec, deck_name = args
+    cfg = TrainConfig(**json.loads(cfg_json))
+    tables = build_tables()
+    d = get_deck(deck_name)
+    policy = PolicyModel(model_config_for(cfg.model_size, tables))
+    load_checkpoint(ckpt_path, policy, _NullCritic())
+    policy.eval()
+    if opp_spec == "random":
+        opponent = "random"
+    else:
+        opponent = PolicyModel(model_config_for(cfg.model_size, tables))
+        load_checkpoint(opp_spec, opponent, _NullCritic())
+        opponent.eval()
+    wins = 0
+    for g in range(n_games):
+        gen = torch.Generator().manual_seed(
+            game_seed(cfg, 200_000 + round_n, actor_idx, g))
+        wins += play_versus(policy, opponent, tables, (d, list(d)),
+                            gen, model_seat=g % 2, step_cap=cfg.step_cap)
+    return {"wins": wins, "games": n_games}

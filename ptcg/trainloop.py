@@ -236,7 +236,8 @@ import shutil
 METRIC_FIELDS = ["round", "kind", "games", "steps", "loss_pg", "loss_v",
                  "loss_critic", "loss_aux", "entropy", "approx_kl",
                  "epochs_ran", "ratio_drift", "wr_random", "ci_random",
-                 "wr_ck5", "wr_ck15", "mean_len", "wall_s"]
+                 "wr_ck5", "wr_ck15", "wr_random_mean", "wr_champ_nonsample",
+                 "wr_champ_sample", "mean_len", "wall_s"]
 
 
 def _metrics_path(cfg):
@@ -297,7 +298,8 @@ def _eval_due(cfg, round_n, policy, tables):
         return None
     import math
 
-    from .actors import eval_worker, run_actor_pool
+    from .actors import eval_worker, league_eval_worker, run_actor_pool
+    from .decks import SAMPLE, all_decks
     ck = checkpoint_path(cfg, round_n + 1)
     row = {"round": round_n, "kind": "eval"}
 
@@ -309,6 +311,15 @@ def _eval_due(cfg, round_n, policy, tables):
         games = sum(s["games"] for s in stats)
         return wins / max(games, 1), games
 
+    def _run_deck(n_games, opp_spec, deck_name):
+        sub = TrainConfig(**{**asdict(cfg), "games_per_round": n_games})
+        stats = run_actor_pool(sub, round_n, ck, worker=league_eval_worker,
+                               extra=(opp_spec, deck_name))
+        wins = sum(s["wins"] for s in stats)
+        games = sum(s["games"] for s in stats)
+        return wins / max(games, 1)
+
+    # existing sample-deck metrics (UNCHANGED)
     wr, n = _run(cfg.eval_games_random, "random")
     row["wr_random"] = f"{wr:.3f}"
     row["ci_random"] = f"{1.96 * math.sqrt(max(wr * (1 - wr), 1e-9) / max(n, 1)):.3f}"
@@ -317,6 +328,26 @@ def _eval_due(cfg, round_n, policy, tables):
         if ref.exists():
             wr, _ = _run(cfg.eval_games_ckpt, str(ref))
             row[label] = f"{wr:.3f}"
+
+    # per-deck vs random over the portfolio -> wr_random_mean
+    names = all_decks()
+    per_random = max(1, cfg.eval_games_random // len(names))
+    rand_rates = [_run_deck(per_random, "random", nm) for nm in names]
+    row["wr_random_mean"] = f"{sum(rand_rates) / len(rand_rates):.3f}"
+
+    # vs frozen SD-champ over the portfolio (only if the champ exists)
+    champ = cfg.sd_champ_ckpt
+    if champ and Path(champ).exists():
+        per_champ = max(1, cfg.eval_games_ckpt // len(names))
+        nonsample = []
+        for nm in names:
+            r = _run_deck(per_champ, champ, nm)
+            if nm == SAMPLE:
+                row["wr_champ_sample"] = f"{r:.3f}"
+            else:
+                nonsample.append(r)
+        if nonsample:
+            row["wr_champ_nonsample"] = f"{sum(nonsample) / len(nonsample):.3f}"
     return row
 
 
