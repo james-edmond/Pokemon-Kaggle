@@ -44,5 +44,12 @@ def test_aux_targets_single_deck_backcompat():
     g = torch.Generator().manual_seed(1)
     ep = play_league_game(m, m, (deck, list(deck)), tables, learner_seat=0,
                           mirror=True, generator=g)
-    pd, dl, hd = aux_targets(ep.steps[:4], tables, deck)   # single list[int]
-    assert dl.shape == (4, tables.n_rows)
+    steps = ep.steps[:4]
+    pd, dl, hd = aux_targets(steps, tables, deck)   # single list[int] -> shared path
+    assert dl.shape == (len(steps), tables.n_rows)
+    exp = torch.zeros(tables.n_rows)
+    for cid in deck:
+        exp[card_row(cid, tables.n_rows)] += 1.0
+    # shared path: every step's decklist target equals the single deck histogram
+    for i in range(len(steps)):
+        assert torch.equal(dl[i], exp), i

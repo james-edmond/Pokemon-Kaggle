@@ -21,9 +21,8 @@ OUT_PATH = os.path.join(REPO, "ptcg", "decklists.py")
 def read_deck_csv(path):
     with open(path, encoding="utf-8") as f:
         lines = [ln.strip() for ln in f.read().split("\n") if ln.strip()]
-    ids = [int(ln) for ln in lines[:60]]
-    assert len(ids) == 60, f"{path}: expected 60 ids, got {len(ids)}"
-    return ids
+    assert len(lines) == 60, f"{path}: expected 60 ids, got {len(lines)}"
+    return [int(ln) for ln in lines]
 
 
 def main():

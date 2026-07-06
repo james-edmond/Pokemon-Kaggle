@@ -18,3 +18,16 @@ def test_league_eval_worker_per_deck(tmp_path):
                               str(tmp_path / "checkpoint-0000.pt"),
                               "random", SAMPLE))
     assert out["games"] == 2 and 0 <= out["wins"] <= 2
+
+
+def test_league_eval_worker_unknown_deck_raises(tmp_path):
+    import pytest
+    tables = build_tables()
+    cfg = TrainConfig(run_dir=str(tmp_path), model_size="tiny")
+    p = PolicyModel(tiny_config(tables)); c = CriticModel(critic_config(tables))
+    opt = torch.optim.Adam(list(p.parameters()) + list(c.parameters()))
+    save_checkpoint(cfg, 0, p, c, opt)
+    with pytest.raises(KeyError):
+        league_eval_worker((json.dumps(asdict(cfg)), 0, 0, 2,
+                            str(tmp_path / "checkpoint-0000.pt"),
+                            "random", "not-a-real-deck"))
