@@ -78,7 +78,8 @@ def run_actor_pool(cfg, round_n, ckpt_path, worker=collect_round_worker,
         return pool.map(worker, jobs)
 
 
-def play_versus(model, opponent, tables, decks, generator, model_seat):
+def play_versus(model, opponent, tables, decks, generator, model_seat,
+                step_cap=5000):
     s = BattleSession(decks[0], decks[1])
     trackers = (BeliefTracker(0), BeliefTracker(1))
     rng = random.Random(int(torch.randint(1 << 30, (1,), generator=generator)))
@@ -86,7 +87,7 @@ def play_versus(model, opponent, tables, decks, generator, model_seat):
         n = 0
         while not s.done:
             n += 1
-            if n > 5000:
+            if n > step_cap:
                 raise RuntimeError("step cap exceeded")
             me = s.select_player
             trackers[me].update(s.obs.get("logs", []))
@@ -125,5 +126,5 @@ def eval_worker(args):
         gen = torch.Generator().manual_seed(
             game_seed(cfg, 100_000 + round_n, actor_idx, g))
         wins += play_versus(policy, opponent, tables, (deck, list(deck)),
-                            gen, model_seat=g % 2)
+                            gen, model_seat=g % 2, step_cap=cfg.step_cap)
     return {"wins": wins, "games": n_games}

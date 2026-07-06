@@ -1,9 +1,12 @@
+import csv
+
 import pytest
 import torch
 
-from ptcg.trainloop import (TrainConfig, checkpoint_path, latest_checkpoint,
-                            load_checkpoint, model_config_for, read_metrics,
-                            round_dir, save_checkpoint, train)
+from ptcg.trainloop import (METRIC_FIELDS, TrainConfig, _metrics_path,
+                            checkpoint_path, latest_checkpoint, load_checkpoint,
+                            model_config_for, read_metrics, round_dir,
+                            save_checkpoint, train)
 
 
 def _cfg(tmp_path):
@@ -27,6 +30,38 @@ def test_one_round_end_to_end_then_resume(tmp_path):
     assert n2 == 2
     rows = read_metrics(cfg)
     assert [int(r["round"]) for r in rows if r["kind"] == "train"] == [0, 1]
+
+
+def test_resume_backfills_eval_lost_to_kill(tmp_path):
+    """A kill in the post-checkpoint eval window loses only the eval metrics
+    row; the checkpoint survives. On resume train() must re-run that eval and
+    append the row back without redoing training rounds."""
+    cfg = TrainConfig(run_dir=str(tmp_path), model_size="tiny",
+                      games_per_round=2, actors=1, epochs=1, minibatch=64,
+                      eval_every=2, eval_games_random=4, eval_games_ckpt=4,
+                      device="cpu", seed=5)
+    # Rounds 0,1: round 1 triggers an eval (rnd+1 == 2, a multiple of 2).
+    train(cfg, max_rounds=2)
+    assert latest_checkpoint(cfg)[0] == 2
+    rows = read_metrics(cfg)
+    assert [int(r["round"]) for r in rows if r["kind"] == "train"] == [0, 1]
+    assert any(r["kind"] == "eval" and int(r["round"]) == 1 for r in rows)
+
+    # Simulate the kill: rewrite metrics.csv without the round-1 eval row while
+    # keeping checkpoint-0002 (the resume source) intact.
+    kept = [r for r in rows
+            if not (r["kind"] == "eval" and int(r["round"]) == 1)]
+    with open(_metrics_path(cfg), "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=METRIC_FIELDS)
+        w.writeheader()
+        w.writerows(kept)
+
+    # Resume at start=2 (2 % eval_every == 0): backfills the eval, no new round.
+    train(cfg, max_rounds=2)
+    rows2 = read_metrics(cfg)
+    assert [int(r["round"]) for r in rows2 if r["kind"] == "train"] == [0, 1]
+    eval_rows = [r for r in rows2 if r["kind"] == "eval"]
+    assert len(eval_rows) == 1 and int(eval_rows[0]["round"]) == 1
 
 
 def _build_on(cfg, tables):

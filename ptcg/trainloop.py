@@ -250,10 +250,32 @@ def read_metrics(cfg):
 def truncate_metrics(cfg, before_round):
     rows = [r for r in read_metrics(cfg) if int(r["round"]) < before_round]
     p = _metrics_path(cfg)
-    with open(p, "w", newline="") as f:
+    tmp = p.with_suffix(".csv.tmp")
+    with open(tmp, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=METRIC_FIELDS)
         w.writeheader()
         w.writerows(rows)
+    os.replace(tmp, p)
+
+
+def _config_drift_warnings(ck_config, cfg) -> list[str]:
+    """Compare a checkpoint's stored config against the live cfg and return
+    human-readable warnings (no raise) for drift on keys that change training
+    semantics, plus a warning when eval_every departs from the assumed 5."""
+    warnings = []
+    cur = asdict(cfg)
+    for key in ("model_size", "minibatch", "eval_every",
+                "games_per_round", "device"):
+        a = ck_config.get(key)
+        b = cur.get(key)
+        if a != b:
+            warnings.append(
+                f"warning: resume config drift: {key} checkpoint={a} cli={b}")
+    if cfg.eval_every != 5:
+        warnings.append(
+            f"warning: eval_every={cfg.eval_every} != 5; eval reference "
+            "offsets (5/15) and pruning protection assume eval_every=5")
+    return warnings
 
 
 def _eval_due(cfg, round_n, policy, tables):
@@ -312,11 +334,25 @@ def train(cfg, max_rounds):
         save_checkpoint(cfg, 0, policy, critic, optim)
         start = 0
     else:
+        ck_meta = torch.load(latest[1], map_location="cpu", weights_only=False)
+        for w in _config_drift_warnings(ck_meta.get("config", {}), cfg):
+            print(w)
         start = load_checkpoint(latest[1], policy, critic, optim)
         truncate_metrics(cfg, start)
         rd = round_dir(cfg, start)
         if rd.exists():
             shutil.rmtree(rd)  # incomplete round from a crash
+        # Backfill an eval lost to a kill in the post-checkpoint eval window:
+        # the eval for checkpoint `start` runs after that checkpoint is saved,
+        # so a kill there loses only the metrics row (the checkpoint is intact).
+        if (start > 0 and start % cfg.eval_every == 0
+                and checkpoint_path(cfg, start).exists()):
+            has_eval = any(r["kind"] == "eval" and int(r["round"]) == start - 1
+                           for r in read_metrics(cfg))
+            if not has_eval:
+                ev = _eval_due(cfg, start - 1, policy, tables)
+                if ev is not None:
+                    append_metrics(cfg, ev)
 
     for rnd in range(start, max_rounds):
         t0 = _time.perf_counter()

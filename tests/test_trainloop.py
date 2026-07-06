@@ -1,11 +1,15 @@
+from dataclasses import asdict
+
 import torch
 from ptcg.cards import build_tables
 from ptcg.engine import load_sample_deck
 from ptcg.model import CriticModel, PolicyModel, critic_config, tiny_config
 from ptcg.rollout import play_game
-from ptcg.trainloop import (TrainConfig, checkpoint_path, latest_checkpoint,
-                            load_checkpoint, load_round, prune_checkpoints,
-                            round_dir, save_checkpoint, save_game)
+from ptcg.trainloop import (METRIC_FIELDS, TrainConfig, _config_drift_warnings,
+                            _metrics_path, append_metrics, checkpoint_path,
+                            latest_checkpoint, load_checkpoint, load_round,
+                            prune_checkpoints, read_metrics, round_dir,
+                            save_checkpoint, save_game, truncate_metrics)
 
 
 def test_game_roundtrip(tmp_path):
@@ -61,3 +65,39 @@ def test_prune_checkpoints_retention_and_idempotence(tmp_path):
     survivors2 = {int(f.stem.split("-")[1])
                   for f in tmp_path.glob("checkpoint-*.pt")}
     assert survivors2 == {0, 5, 10, 11, 12}
+
+
+def test_truncate_metrics_atomic(tmp_path):
+    cfg = TrainConfig(run_dir=str(tmp_path), model_size="tiny")
+    for n in range(4):  # rounds 0-3
+        append_metrics(cfg, dict(round=n, kind="train", games=2, steps=10))
+    truncate_metrics(cfg, 2)
+    rows = read_metrics(cfg)
+    assert [int(r["round"]) for r in rows] == [0, 1]
+    assert all(r["kind"] == "train" for r in rows)
+    # header survived intact
+    header = _metrics_path(cfg).read_text().splitlines()[0]
+    assert header.split(",") == METRIC_FIELDS
+    # atomic write left no stray tmp file
+    assert not (tmp_path / "metrics.csv.tmp").exists()
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_config_drift_warnings_exact_list():
+    base = TrainConfig(run_dir="x", model_size="tiny", minibatch=64,
+                       eval_every=5, games_per_round=192, device="cpu")
+    ck_config = asdict(base)
+    # no drift and eval_every == 5 -> no warnings
+    assert _config_drift_warnings(ck_config, base) == []
+    # drift on every guarded key plus eval_every != 5
+    drifted = TrainConfig(run_dir="x", model_size="student", minibatch=512,
+                          eval_every=10, games_per_round=96, device="cuda")
+    assert _config_drift_warnings(ck_config, drifted) == [
+        "warning: resume config drift: model_size checkpoint=tiny cli=student",
+        "warning: resume config drift: minibatch checkpoint=64 cli=512",
+        "warning: resume config drift: eval_every checkpoint=5 cli=10",
+        "warning: resume config drift: games_per_round checkpoint=192 cli=96",
+        "warning: resume config drift: device checkpoint=cpu cli=cuda",
+        "warning: eval_every=10 != 5; eval reference offsets (5/15) and "
+        "pruning protection assume eval_every=5",
+    ]
