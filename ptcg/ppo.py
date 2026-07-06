@@ -60,13 +60,15 @@ def ppo_policy_loss(new_lp, old_lp, adv, clip=0.2):
     return pg, ratio, approx_kl
 
 
-def aux_targets(steps, tables, opp_deck):
+def aux_targets(steps, tables, opp_decks):
     """Targets for the train-only aux heads, from stored tensors only.
 
     prize_diff: (opp prizes remaining - own prizes remaining) read from the
     public state's player-summary rows (positive = acting seat is ahead).
-    decklist: full opponent decklist as card-table-row counts (constant under
-    mirror play; kept per-step for phase-3 portability).
+    decklist: opponent decklist as card-table-row counts. `opp_decks` is
+    either a single `list[int]` (phase-2 behavior: one shared deck used for
+    every step) or a list of per-step `list[int]` aligned with `steps` (each
+    step's own opponent deck, e.g. for multi-deck league play).
     hand: true opponent hand counts from the privileged state. The privileged
     view is seat-0-fixed, so the acting seat's opponent is OWNER_OPP when
     player==0 and OWNER_SELF when player==1.
@@ -76,13 +78,20 @@ def aux_targets(steps, tables, opp_deck):
     pd = torch.zeros(B)
     dl = torch.zeros(B, n_rows)
     hd = torch.zeros(B, n_rows)
-    dl_vec = torch.zeros(n_rows)
-    for cid in opp_deck:
-        dl_vec[card_row(cid, n_rows)] += 1.0
+    shared = bool(opp_decks) and isinstance(opp_decks[0], int)
+    shared_vec = None
+    if shared:
+        shared_vec = torch.zeros(n_rows)
+        for cid in opp_decks:
+            shared_vec[card_row(cid, n_rows)] += 1.0
     for i, s in enumerate(steps):
         num = s.state.numeric
         pd[i] = float(num[_PSUM_OPP, F_PRIZEN] - num[_PSUM_SELF, F_PRIZEN]) * 6.0
-        dl[i] = dl_vec
+        if shared:
+            dl[i] = shared_vec
+        else:
+            for cid in opp_decks[i]:
+                dl[i, card_row(cid, n_rows)] += 1.0
         opp_owner = OWNER_OPP if s.player == 0 else OWNER_SELF
         pv = s.priv_state
         rows = np.where((pv.zone[:pv.n] == AREA_HAND)
