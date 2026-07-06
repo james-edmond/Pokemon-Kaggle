@@ -81,3 +81,36 @@ def validate(deck):
     if not ok:
         return False, why
     return is_playable(deck)
+
+
+SAMPLE = "sample"
+
+
+@lru_cache(maxsize=1)
+def _build_portfolio():
+    from . import decklists
+    out = {SAMPLE: list(decklists.SAMPLE_IDS)}
+    skipped = dict(getattr(decklists, "SKIPPED", {}))
+    for name, ids in decklists.DECKS.items():
+        d = list(ids)
+        if len(d) != 60:
+            skipped[name] = f"not 60 cards ({len(d)})"
+            continue
+        out[name] = d
+    return out, skipped
+
+
+PORTFOLIO = _build_portfolio()[0]
+SKIPPED = _build_portfolio()[1]
+
+
+def all_decks():
+    return list(PORTFOLIO)
+
+
+def train_decks():
+    return list(PORTFOLIO)
+
+
+def deck(name):
+    return list(PORTFOLIO[name])
