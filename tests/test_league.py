@@ -24,6 +24,16 @@ def test_snapshot_and_prune(tmp_path):
     assert snapshot_rounds(cfg) == [0, 5, 20, 25]
 
 
+def test_prune_pool_cap_le_anchors(tmp_path):
+    tables = build_tables()
+    cfg = _cfg(tmp_path)
+    p = PolicyModel(tiny_config(tables))
+    for r in (0, 5, 10, 15):
+        snapshot(cfg, r, p)
+    kept = prune_pool(cfg, cap=2, anchors=2)   # cap == anchors: must not keep all
+    assert kept == [0, 5] and snapshot_rounds(cfg) == [0, 5]
+
+
 def test_snapshot_roundtrip_loads_same_weights(tmp_path):
     tables = build_tables()
     cfg = _cfg(tmp_path)

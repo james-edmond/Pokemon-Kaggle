@@ -36,7 +36,10 @@ def prune_pool(cfg, cap, anchors=2) -> list:
     rounds = snapshot_rounds(cfg)
     if len(rounds) <= cap:
         return rounds
-    keep = set(rounds[:anchors]) | set(rounds[-(cap - anchors):])
+    anchors = min(anchors, cap)            # cannot anchor more than the cap
+    newest_n = max(cap - anchors, 0)
+    newest = set(rounds[-newest_n:]) if newest_n else set()
+    keep = set(rounds[:anchors]) | newest
     for r in rounds:
         if r not in keep:
             _snap_path(cfg, r).unlink()
