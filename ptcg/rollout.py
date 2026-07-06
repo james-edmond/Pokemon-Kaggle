@@ -1,7 +1,10 @@
+import random
 from dataclasses import dataclass
 
+import torch
+
 from .action import SelectDecision, sample_select
-from .engine import BattleSession
+from .engine import BattleSession, random_picks
 from .featurize import (FEATURIZER_VERSION, EncodedSelect, TokenizedState,
                         encode_select, featurize_privileged, featurize_state)
 from .tracker import BeliefTracker
@@ -23,6 +26,8 @@ class Episode:
     result: int
     rewards: tuple
     featurizer_version: int = FEATURIZER_VERSION
+    decks: tuple = (None, None)
+    collected_seats: tuple = (0, 1)
 
 
 def play_game(model, decks, tables, generator=None, step_cap=5000,
@@ -64,3 +69,51 @@ def play_game(model, decks, tables, generator=None, step_cap=5000,
         s.close()
     rewards = (0.0, 0.0) if r == 2 else ((1.0, -1.0) if r == 0 else (-1.0, 1.0))
     return Episode(steps, r, rewards)
+
+
+def play_league_game(learner, opponent, decks, tables, *, learner_seat,
+                     mirror, generator=None, step_cap=5000):
+    s = BattleSession(decks[0], decks[1])
+    trackers = (BeliefTracker(0), BeliefTracker(1))
+    last_obs = [s.obs, s.obs]
+    seen = [False, False]
+    steps = []
+    try:
+        while not s.done:
+            if len(steps) >= step_cap:
+                raise RuntimeError("step cap exceeded")
+            me = s.select_player
+            last_obs[me] = s.obs
+            seen[me] = True
+            trackers[me].update(s.obs.get("logs", []))
+            actor = learner if me == learner_seat else opponent
+            collect = mirror or (me == learner_seat)
+            if actor == "random":
+                rng = random.Random(int(torch.randint(1 << 30, (1,), generator=generator)))
+                s.select(random_picks(s.obs, rng))
+                continue
+            ts = featurize_state(s.obs, me, decks[me], trackers[me].snapshot(), tables)
+            es = encode_select(s.obs, ts, tables)
+            # a seat that has not yet acted has no obs of its own: its slot in
+            # last_obs holds the other seat's obs, where its hand is None.
+            # Source that hand from the engine's full-information VisualizeData.
+            if collect:
+                vcur = s.viz_current()
+                viz_hands = None
+                if not (seen[0] and seen[1]):
+                    vp = vcur.get("players") or []
+                    if len(vp) == 2:
+                        viz_hands = [vp[0].get("hand"), vp[1].get("hand")]
+                pv = featurize_privileged(last_obs[0], last_obs[1], decks, tables,
+                                          viz=vcur, viz_hands=viz_hands)
+            d = sample_select(actor, ts, es, generator)
+            if collect:
+                steps.append(Step(me, ts, es, d.picks, d.logprob, pv))
+            s.select(d.picks)
+        r = s.result
+    finally:
+        s.close()
+    rewards = (0.0, 0.0) if r == 2 else ((1.0, -1.0) if r == 0 else (-1.0, 1.0))
+    cs = (0, 1) if mirror else (learner_seat,)
+    return Episode(steps, r, rewards, decks=(list(decks[0]), list(decks[1])),
+                   collected_seats=cs)
