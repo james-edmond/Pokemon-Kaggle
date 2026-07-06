@@ -59,6 +59,52 @@ def collect_round_worker(args):
             "wall_s": time.perf_counter() - t0}
 
 
+def league_round_worker(args):
+    import random as _r
+
+    from .decks import deck as get_deck, train_decks
+    from .league import load_opponent, sample_opponent
+    from .rollout import play_league_game
+    from .trainloop import save_game
+
+    cfg_json, round_n, actor_idx, n_games, ckpt_path = args
+    cfg = TrainConfig(**json.loads(cfg_json))
+    tables = build_tables()
+    policy = PolicyModel(model_config_for(cfg.model_size, tables))
+    load_checkpoint(ckpt_path, policy, _NullCritic(), optim=None)
+    policy.eval()
+    rd = round_dir(cfg, round_n)
+    rd.mkdir(parents=True, exist_ok=True)
+    names = train_decks()
+    t0 = time.perf_counter()
+    steps = 0
+    results = []
+    for g in range(n_games):
+        seed = game_seed(cfg, round_n, actor_idx, g)
+        rng = _r.Random(seed)
+        gen = torch.Generator().manual_seed(seed)
+        kind, path = sample_opponent(cfg, round_n, rng)
+        da = get_deck(rng.choice(names))
+        db = get_deck(rng.choice(names))
+        learner_seat = rng.randint(0, 1)
+        mirror = kind == "current"
+        if mirror:
+            opponent = policy
+        elif kind == "pool":
+            opponent = load_opponent(path, tables, cfg)
+        else:  # kind == "random"
+            opponent = "random"
+        with torch.no_grad():
+            ep = play_league_game(policy, opponent, (da, db), tables,
+                                  learner_seat=learner_seat, mirror=mirror,
+                                  generator=gen, step_cap=cfg.step_cap)
+        save_game(rd / f"a{actor_idx}-g{g}.pt", ep)
+        steps += len(ep.steps)
+        results.append(ep.result)
+    return {"games": n_games, "steps": steps, "results": results,
+            "wall_s": time.perf_counter() - t0}
+
+
 def run_actor_pool(cfg, round_n, ckpt_path, worker=collect_round_worker,
                    extra=None):
     import multiprocessing as mp

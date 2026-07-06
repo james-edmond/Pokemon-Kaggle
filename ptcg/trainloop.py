@@ -143,7 +143,15 @@ def learner_update(policy, critic, optim, episodes, cfg, tables, opp_deck):
     critic.to(device)
     steps, old_lp, adv, ret = assemble_advantages(
         episodes, critic, device=device, lam=cfg.lam, gamma=cfg.gamma)
-    pd_t, dl_t, hd_t = aux_targets(steps, tables, opp_deck)
+    # build per-step opponent decks from each episode's recorded decks
+    opp_decks = []
+    for ep in episodes:
+        ep_decks = getattr(ep, "decks", (None, None))
+        for s in ep.steps:
+            od = ep_decks[1 - s.player] if ep_decks[1 - s.player] is not None else opp_deck
+            opp_decks.append(od)
+    assert len(opp_decks) == len(steps)
+    pd_t, dl_t, hd_t = aux_targets(steps, tables, opp_decks)
     old_lp, adv, ret = old_lp.to(device), adv.to(device), ret.to(device)
     pd_t, dl_t, hd_t = pd_t.to(device), dl_t.to(device), hd_t.to(device)
     B = len(steps)
