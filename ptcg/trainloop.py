@@ -323,9 +323,10 @@ def _eval_due(cfg, round_n, policy, tables):
 def train(cfg, max_rounds):
     import time as _time
 
-    from .actors import run_actor_pool
+    from .actors import league_round_worker, run_actor_pool
     from .cards import build_tables
     from .engine import load_sample_deck
+    from .league import prune_pool, snapshot
 
     tables = build_tables()
     deck = load_sample_deck()
@@ -371,7 +372,7 @@ def train(cfg, max_rounds):
     for rnd in range(start, max_rounds):
         t0 = _time.perf_counter()
         ck = checkpoint_path(cfg, rnd)
-        stats = run_actor_pool(cfg, rnd, ck)
+        stats = run_actor_pool(cfg, rnd, ck, worker=league_round_worker)
         episodes = load_round(cfg, rnd)
         policy.train()
         critic.train()
@@ -379,6 +380,9 @@ def train(cfg, max_rounds):
         policy.eval()
         critic.eval()
         save_checkpoint(cfg, rnd + 1, policy, critic, optim)
+        if (rnd + 1) % cfg.snapshot_every == 0:
+            snapshot(cfg, rnd + 1, policy)
+            prune_pool(cfg, cfg.pool_cap)
         n_steps = sum(s["steps"] for s in stats)
         mean_len = n_steps / max(sum(s["games"] for s in stats), 1)
         append_metrics(cfg, dict(
