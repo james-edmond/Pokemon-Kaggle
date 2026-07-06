@@ -12,6 +12,8 @@ class _S:  # minimal Step stand-in with the fields aux_targets reads
 
 
 def test_aux_targets_per_step_decks():
+    from collections import Counter
+    from ptcg.decks import deck as get_deck
     tables = build_tables()
     deck = load_sample_deck()
     m = PolicyModel(tiny_config(tables))
@@ -19,16 +21,20 @@ def test_aux_targets_per_step_decks():
     ep = play_league_game(m, m, (deck, list(deck)), tables, learner_seat=0,
                           mirror=True, generator=g)
     steps = ep.steps[:6]
-    deckA = deck
-    deckB = list(reversed(deck))                 # a different "opponent" deck id-list
+    deckA = get_deck("dragapult-ex")            # genuinely different card content
+    deckB = get_deck("raging-bolt-ex")
     per = [deckB if s.player == 0 else deckA for s in steps]
     pd, dl, hd = aux_targets(steps, tables, per)
     assert dl.shape == (len(steps), tables.n_rows)
-    # a step whose opponent deck is deckB has that deck's row counts
-    i = next(k for k, s in enumerate(steps) if s.player == 0)
-    from collections import Counter
-    exp = Counter(card_row(c, tables.n_rows) for c in deckB)
-    assert dl[i, next(iter(exp))] > 0
+    cntA = Counter(card_row(c, tables.n_rows) for c in deckA)
+    cntB = Counter(card_row(c, tables.n_rows) for c in deckB)
+    disc = [r for r in set(cntA) | set(cntB) if cntA.get(r, 0) != cntB.get(r, 0)]
+    assert disc, "decks not distinguishable at card-row granularity"
+    row = disc[0]
+    # each step's decklist target must reflect ITS assigned opponent deck
+    for i, s in enumerate(steps):
+        want = cntB if s.player == 0 else cntA
+        assert dl[i, row].item() == float(want.get(row, 0)), (i, s.player)
 
 
 def test_aux_targets_single_deck_backcompat():
