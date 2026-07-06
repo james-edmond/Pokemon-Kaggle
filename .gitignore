@@ -180,3 +180,4 @@ pokemon-tcg-ai-battle/
 # Training pipeline (phase 2)
 venv-train/
 runs/
+champ/

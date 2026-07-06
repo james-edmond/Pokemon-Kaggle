@@ -45,6 +45,18 @@ def main(run_dir):
         ax.set_title("win rates")
         ax.legend()
         fig2.savefig(out / "eval.png", dpi=120)
+
+        fig3, ax3 = plt.subplots(figsize=(8, 5))
+        for k in ("wr_champ_nonsample", "wr_champ_sample", "wr_random_mean"):
+            x, y = series(eval_rows, k)
+            if x:
+                ax3.plot(x, y, marker="o", label=k)
+        ax3.axhline(0.60, ls=":", c="green", label="0.60 target")
+        ax3.axhline(0.5, ls="--", c="gray")
+        ax3.set_ylim(0, 1)
+        ax3.set_title("generalization vs SD-champ / portfolio")
+        ax3.legend()
+        fig3.savefig(out / "generalization.png", dpi=120)
     print(f"wrote {out}")
 
 
