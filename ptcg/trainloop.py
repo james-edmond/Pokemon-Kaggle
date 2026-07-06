@@ -35,6 +35,12 @@ class TrainConfig:
     device: str = "cpu"
     seed: int = 0
     step_cap: int = 5000
+    mirror_frac: float = 0.30
+    pool_frac: float = 0.65
+    random_frac: float = 0.05
+    snapshot_every: int = 5
+    pool_cap: int = 18
+    sd_champ_ckpt: str = ""
 
 
 def model_config_for(size, tables):
