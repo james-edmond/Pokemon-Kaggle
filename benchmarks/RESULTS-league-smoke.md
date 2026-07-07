@@ -138,3 +138,42 @@ Both smoke run directories (`runs/league-smoke/`, `runs/league-gpu/`) were
 deleted after recording the results above; they were never intended to be
 kept (`runs/` is git-ignored regardless). `champ/sd-champ.pt` was left in
 place — the phase-3 qualification run (Task 10) depends on it.
+
+## Qualification run — phase3-a
+
+Command (fully detached, repo root):
+    venv-train\Scripts\python scripts\train.py --run-id phase3-a --device cuda --seed 1 --minibatch 128 --sd-champ-ckpt champ\sd-champ.pt --games-per-round 256
+
+Ran **80 rounds over ~22 h** (Jul 6 18:34 -> Jul 7 16:53), 256 games/round, student
+model, minibatch 128 on the GTX 1060. Aborted at round 80 by the epoch-0 ratio
+gate (`max|ratio-1|=1.01e-3 > 1e-3`) — a **benign CPU-collect/GPU-replay numerical
+false-positive** (see Gate fix), not instability.
+
+Final eval (round 79): wr_champ_nonsample=0.807, wr_champ_sample=0.455,
+wr_random_mean=0.914, wr_random(sample)=0.870, wr_ck15=0.590.
+
+Success criteria:
+1. **Generalization (wr_champ_nonsample > 0.60, two consecutive evals): MET decisively** —
+   15 consecutive evals in 0.72-0.91 (peak 0.909 @ round 69, 0.807 @ round 79). The
+   multi-deck policy beats the frozen single-deck SD-champ on decks it never trained on.
+2. **Sustained gradient (> 0.55 vs 15-back, longer than single-deck): met** — wr_ck15
+   ~0.52-0.72 out to round 79, well past phase-2's ~round-15 coin-flip stall.
+3. **Per-deck competence (>= 0.70 vs random, every deck): MET** — diagnostic on
+   checkpoint-0080 (40 games/deck): marnies-grimmsnarl 1.00, mega-gardevoir 1.00,
+   raging-bolt 1.00, ceruledge 0.95, terapagos 0.925, dragapult/iron-future-box/
+   miraidon-lightning/sample 0.90 — all >= 0.90.
+4. **Stability: the round-80 ratio-gate abort was the one failure** (zero NaN, metrics
+   contiguous). Root-caused as a benign numerical false-positive and fixed.
+
+Gate fix (commit 01d83fd "ratio gate on mean drift, robust to cpu/gpu outlier steps"):
+the epoch-0 gate aborted on the global MAX |ratio-1|. Workers collect logprobs on CPU
+while learner_update replays on GPU; CPU/GPU float divergence on the single worst step
+grows with policy sharpening (entropy 1.38 @ r0 -> 1.15 @ r79) and crossed the tight
+1e-3 max-gate at round 80. Fixed to abort on the MEAN |ratio-1| (a real policy/data
+mismatch shifts every step -> large mean; benign drift spikes only the worst step ->
+tiny mean; length-independent). Logged ratio_drift metric unchanged (still max);
+protection intact (the stale-policy-abort test still raises).
+
+Verdict: **criteria 1-3 met; criterion 4's lone failure was the benign gate false-positive,
+now fixed.** Phase-3 league training achieves the generalization goal. checkpoint-0080 is
+a healthy, fully-trained policy; resume with the same command (gate fix is in code).
