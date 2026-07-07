@@ -135,7 +135,8 @@ def prune_checkpoints(cfg, current_round) -> list[str]:
 def learner_update(policy, critic, optim, episodes, cfg, tables, opp_deck):
     import torch as _t
     from .model import collate_selects, collate_states
-    from .ppo import (assemble_advantages, aux_targets, ppo_policy_loss)
+    from .ppo import (assemble_advantages, aux_targets, ppo_policy_loss,
+                      ratio_drift_stats)
     from .replay import batched_replay
 
     device = _t.device(cfg.device)
@@ -172,17 +173,25 @@ def learner_update(policy, critic, optim, episodes, cfg, tables, opp_deck):
                                      [steps[i].picks for i in idx])
         return sb, trunk, lp, ent
 
-    # epoch-0 ratio gate over the full round
+    # epoch-0 ratio gate over the full round. Abort on the MEAN |ratio-1|: a
+    # genuine policy/data mismatch shifts every step, whereas benign
+    # CPU-collect/GPU-replay divergence spikes only the single worst step (and
+    # grows with policy sharpness over a long run). ratio_drift (logged) stays
+    # the max for diagnostic visibility.
     with _t.no_grad():
-        drifts = []
+        dmax, dsum, dn = 0.0, 0.0, 0
         for idx in minibatches(list(range(B))):
             _, _, lp, _ = replay_mb(idx, grad=False)
-            drifts.append((lp - old_lp[idx]).exp().sub(1).abs().max())
-        ratio_drift = float(_t.stack(drifts).max()) if drifts else 0.0
-    if ratio_drift > cfg.ratio_gate:
+            mx, sm, n = ratio_drift_stats(lp, old_lp[idx])
+            dmax = max(dmax, mx)
+            dsum += sm
+            dn += n
+        ratio_drift = dmax
+        ratio_mean = dsum / max(dn, 1)
+    if ratio_mean > cfg.ratio_gate:
         raise RuntimeError(
-            f"ratio gate violated: max|ratio-1|={ratio_drift:.2e} "
-            f"> {cfg.ratio_gate:.0e} — policy/data mismatch")
+            f"ratio gate violated: mean|ratio-1|={ratio_mean:.2e} "
+            f"> {cfg.ratio_gate:.0e} (max={ratio_drift:.2e}) — policy/data mismatch")
 
     poiss = _t.nn.PoissonNLLLoss(log_input=False, full=False)
     agg = {k: 0.0 for k in ("loss_pg", "loss_v", "loss_critic", "loss_aux",

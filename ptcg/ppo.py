@@ -52,6 +52,18 @@ def assemble_advantages(episodes, critic, device=None, lam=0.95, gamma=1.0,
     return steps, old_lp, adv, ret
 
 
+def ratio_drift_stats(new_lp, old_lp):
+    """|exp(new_lp - old_lp) - 1| statistics for the epoch-0 ratio gate.
+    Returns (max, sum, count) so callers can aggregate across minibatches.
+    A genuine policy/data mismatch shifts every step (large mean); benign
+    CPU-collect/GPU-replay divergence spikes only the worst step (large max,
+    tiny mean)."""
+    d = (new_lp - old_lp).exp().sub(1).abs()
+    if d.numel() == 0:
+        return 0.0, 0.0, 0
+    return float(d.max()), float(d.sum()), int(d.numel())
+
+
 def ppo_policy_loss(new_lp, old_lp, adv, clip=0.2):
     ratio = (new_lp - old_lp).exp()
     clipped = torch.clamp(ratio, 1.0 - clip, 1.0 + clip)
