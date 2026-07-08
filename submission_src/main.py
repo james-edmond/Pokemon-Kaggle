@@ -3,7 +3,8 @@ import random
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-os.environ.setdefault("PTCG_ENGINE_DIR", _HERE)  # bundled cg/ lives beside this file
+if os.path.isdir(os.path.join(_HERE, "cg")):
+    os.environ.setdefault("PTCG_ENGINE_DIR", _HERE)  # bundled cg/ lives beside this file
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
