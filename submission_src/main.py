@@ -31,10 +31,12 @@ def _ensure_model():
     if _MODEL is not None or _GAVE_UP:
         return
     try:
+        import pickle
         import torch
-        from ptcg.cards import build_tables
+        import ptcg.cards  # noqa: F401 -- needed so pickle can reconstruct CardTables
         from ptcg.model import PolicyModel, student_config
-        _TABLES = build_tables()
+        with open(os.path.join(_HERE, "tables.pkl"), "rb") as f:
+            _TABLES = pickle.load(f)
         m = PolicyModel(student_config(_TABLES))
         m.load_state_dict(torch.load(os.path.join(_HERE, "policy.pt"),
                                      map_location="cpu"))
