@@ -44,3 +44,15 @@ def test_is_legal_empty_decline_and_bounds():
     assert mod._is_legal([0, 0], sel1) is False     # duplicate
     assert mod._is_legal([3], sel1) is False        # out of range
     assert mod._is_legal([0, 1, 2], sel1) is False  # exceeds maxCount
+
+
+def test_fallback_never_raises_on_malformed_select():
+    mod = _load_agent()
+    # a non-None select missing "current"/"maxCount" must still yield a list, never raise
+    assert isinstance(mod.agent({"select": {"option": [0, 1]}, "logs": []}), list)
+    assert mod.agent({"select": {}, "logs": []}) == []
+    # maxCount > len(option) is clamped to a legal distinct pick
+    picks = mod._fallback({"select": {"option": [0, 1], "minCount": 1, "maxCount": 5}})
+    assert isinstance(picks, list) and len(picks) == 2 and len(set(picks)) == 2
+    # totally malformed select never raises
+    assert mod._fallback({"select": {}}) == []

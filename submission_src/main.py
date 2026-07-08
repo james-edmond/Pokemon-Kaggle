@@ -41,8 +41,12 @@ def _ensure_model():
 
 
 def _fallback(obs_dict):
-    sel = obs_dict["select"]
-    return random.sample(range(len(sel["option"])), sel["maxCount"])
+    try:
+        sel = obs_dict["select"]
+        n = len(sel["option"])
+        return random.sample(range(n), min(sel["maxCount"], n))
+    except Exception:
+        return []
 
 
 def _is_legal(picks, sel):
