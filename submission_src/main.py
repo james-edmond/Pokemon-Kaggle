@@ -44,6 +44,14 @@ def _fallback(obs_dict):
     return random.sample(range(len(sel["option"])), sel["maxCount"])
 
 
+def _is_legal(picks, sel):
+    n = len(sel["option"])
+    return (isinstance(picks, list)
+            and len(set(picks)) == len(picks)
+            and all(isinstance(p, int) and 0 <= p < n for p in picks)
+            and sel["minCount"] <= len(picks) <= sel["maxCount"])
+
+
 def agent(obs_dict):
     if obs_dict.get("select") is None:
         _STATE["tracker"] = None
@@ -65,11 +73,6 @@ def agent(obs_dict):
         with torch.no_grad():
             d = sample_select(_MODEL, ts, es, _GEN)
         picks = list(d.picks)
-        sel = obs_dict["select"]
-        n = len(sel["option"])
-        legal = (picks and len(set(picks)) == len(picks)
-                 and all(0 <= p < n for p in picks)
-                 and sel["minCount"] <= len(picks) <= sel["maxCount"])
-        return picks if legal else _fallback(obs_dict)
+        return picks if _is_legal(picks, obs_dict["select"]) else _fallback(obs_dict)
     except Exception:
         return _fallback(obs_dict)

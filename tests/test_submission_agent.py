@@ -32,3 +32,15 @@ def test_illegal_or_broken_obs_falls_back_to_legal_pick():
     assert 1 <= len(picks) <= 2
     assert len(set(picks)) == len(picks)
     assert all(0 <= p < 5 for p in picks)
+
+
+def test_is_legal_empty_decline_and_bounds():
+    mod = _load_agent()
+    sel0 = {"option": [0, 1, 2], "minCount": 0, "maxCount": 1}
+    assert mod._is_legal([], sel0) is True          # valid decline when minCount==0
+    assert mod._is_legal([1], sel0) is True
+    sel1 = {"option": [0, 1, 2], "minCount": 1, "maxCount": 2}
+    assert mod._is_legal([], sel1) is False         # must pick >=1
+    assert mod._is_legal([0, 0], sel1) is False     # duplicate
+    assert mod._is_legal([3], sel1) is False        # out of range
+    assert mod._is_legal([0, 1, 2], sel1) is False  # exceeds maxCount
