@@ -181,3 +181,6 @@ pokemon-tcg-ai-battle/
 venv-train/
 runs/
 champ/
+
+# Kaggle submission (phase 3)
+submission_src/policy.pt
