@@ -34,12 +34,12 @@ def main():
         "sys.path.insert(0, os.getcwd())\n"
         "import ptcg, ptcg.action, ptcg.featurize, ptcg.model, ptcg.cards, ptcg.tracker\n"
         "assert os.path.abspath(os.path.dirname(ptcg.__file__)).startswith(os.getcwd()), ptcg.__file__\n"
-        "import importlib.util as u\n"
-        "s = u.spec_from_file_location('m', 'main.py'); m = u.module_from_spec(s); s.loader.exec_module(m)\n"
-        "d = m.agent({'select': None, 'current': None, 'logs': []})\n"
+        "ns = {}\n"
+        "exec(compile(open('main.py').read(), 'main.py', 'exec'), ns)\n"  # Kaggle-style: NO __file__
+        "d = ns['agent']({'select': None, 'current': None, 'logs': []})\n"
         "assert len(d) == 60\n"
         "assert 'cg' not in sys.modules and 'cg.game' not in sys.modules, 'agent loaded cg!'\n"
-        "print('self-contained OK: cg-free, deck', len(d))\n"
+        "print('self-contained OK: no __file__, cg-free, deck', len(d))\n"
     )
     r = subprocess.run([sys.executable, "-c", check], cwd=OUT,
                        capture_output=True, text=True)

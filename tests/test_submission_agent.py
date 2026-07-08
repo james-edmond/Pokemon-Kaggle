@@ -56,3 +56,20 @@ def test_fallback_never_raises_on_malformed_select():
     assert isinstance(picks, list) and len(picks) == 2 and len(set(picks)) == 2
     # totally malformed select never raises
     assert mod._fallback({"select": {}}) == []
+
+
+def test_agent_loads_under_exec_without_dunder_file():
+    # Kaggle loads the agent via exec(code, env) with NO __file__ defined.
+    import os
+    src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "submission_src", "main.py")
+    code = open(src).read()
+    cwd = os.getcwd()
+    os.chdir(os.path.dirname(src))  # so _agent_dir() finds deck.csv in cwd
+    try:
+        ns = {}
+        exec(compile(code, "main.py", "exec"), ns)  # must NOT raise NameError
+        deck = ns["agent"]({"select": None, "current": None, "logs": []})
+        assert isinstance(deck, list) and len(deck) == 60
+    finally:
+        os.chdir(cwd)

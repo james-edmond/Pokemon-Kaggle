@@ -2,7 +2,22 @@ import os
 import random
 import sys
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
+def _agent_dir():
+    # Kaggle exec()s main.py with NO __file__ defined; the agent's files live in
+    # its own directory (typically /kaggle_simulations/agent). Resolve robustly.
+    try:
+        d = os.path.dirname(os.path.abspath(__file__))
+        if os.path.exists(os.path.join(d, "deck.csv")):
+            return d
+    except NameError:
+        pass
+    for cand in ("/kaggle_simulations/agent", os.getcwd()):
+        if os.path.exists(os.path.join(cand, "deck.csv")):
+            return cand
+    return os.getcwd()
+
+
+_HERE = _agent_dir()
 if os.path.isdir(os.path.join(_HERE, "cg")):
     os.environ.setdefault("PTCG_ENGINE_DIR", _HERE)  # bundled cg/ lives beside this file
 if _HERE not in sys.path:
