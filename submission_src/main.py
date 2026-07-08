@@ -22,12 +22,15 @@ _DECK = _read_deck()
 _TABLES = None
 _MODEL = None
 _GEN = None
+_GAVE_UP = False
 _STATE = {"tracker": None, "me": None}
 
 
 def _ensure_model():
-    global _TABLES, _MODEL, _GEN
-    if _MODEL is None:
+    global _TABLES, _MODEL, _GEN, _GAVE_UP
+    if _MODEL is not None or _GAVE_UP:
+        return
+    try:
         import torch
         from ptcg.cards import build_tables
         from ptcg.model import PolicyModel, student_config
@@ -38,6 +41,8 @@ def _ensure_model():
         m.eval()
         _MODEL = m
         _GEN = torch.Generator().manual_seed(0)
+    except Exception:
+        _GAVE_UP = True
 
 
 def _fallback(obs_dict):
@@ -63,11 +68,13 @@ def agent(obs_dict):
         _STATE["me"] = None
         return list(_DECK)
     try:
+        _ensure_model()
+        if _MODEL is None:
+            return _fallback(obs_dict)
         import torch
         from ptcg.action import sample_select
         from ptcg.featurize import encode_select, featurize_state
         from ptcg.tracker import BeliefTracker
-        _ensure_model()
         me = obs_dict["current"]["yourIndex"]
         if _STATE["tracker"] is None or _STATE["me"] != me:
             _STATE["tracker"] = BeliefTracker(me)
@@ -77,7 +84,13 @@ def agent(obs_dict):
         es = encode_select(obs_dict, ts, _TABLES)
         with torch.no_grad():
             d = sample_select(_MODEL, ts, es, _GEN)
-        picks = list(d.picks)
+        picks = [int(p) for p in d.picks]
         return picks if _is_legal(picks, obs_dict["select"]) else _fallback(obs_dict)
     except Exception:
         return _fallback(obs_dict)
+
+
+# Load the model at import (the untimed agent-setup phase on Kaggle) so no timed
+# game move pays the one-time init cost. Never breaks the import: on failure the
+# agent degrades to legal-random play.
+_ensure_model()
