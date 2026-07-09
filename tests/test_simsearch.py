@@ -6,7 +6,8 @@ from ptcg.simsearch import SearchSession
 
 
 def _mid_game_session(max_tries=6):
-    """A live mid-game battle parked on a usable probe state, or skip.
+    """A live mid-game battle parked on a usable probe state; raises
+    AssertionError if none found.
 
     Usable = game not over, select is not a deck-look (select["deck"] is
     None, so the too-short your_deck probe is meaningful), and our
@@ -17,21 +18,26 @@ def _mid_game_session(max_tries=6):
     deck = load_sample_deck()
     for t in range(max_tries):
         sess = BattleSession(deck, deck)
-        rng = random.Random(7 + t)
-        for _ in range(30):
-            if sess.done:
-                break
-            sess.select(random_picks(sess.obs, rng))
-        for _ in range(10):   # walk off deck-look selects if parked on one
-            if sess.done or sess.obs["select"].get("deck") is None:
-                break
-            sess.select(random_picks(sess.obs, rng))
-        me = sess.obs["current"]["yourIndex"] if not sess.done else None
-        if (not sess.done
-                and sess.obs["select"].get("deck") is None
-                and sess.obs["current"]["players"][me]["deckCount"] > 0):
-            return sess, deck
-        sess.close()
+        keep = False
+        try:
+            rng = random.Random(7 + t)
+            for _ in range(30):
+                if sess.done:
+                    break
+                sess.select(random_picks(sess.obs, rng))
+            for _ in range(10):   # walk off deck-look selects if parked on one
+                if sess.done or sess.obs["select"].get("deck") is None:
+                    break
+                sess.select(random_picks(sess.obs, rng))
+            if not sess.done:
+                me = sess.obs["current"]["yourIndex"]
+                if (sess.obs["select"].get("deck") is None
+                        and sess.obs["current"]["players"][me]["deckCount"] > 0):
+                    keep = True
+                    return sess, deck
+        finally:
+            if not keep:
+                sess.close()
     raise AssertionError("no usable mid-game state in %d tries" % max_tries)
 
 
