@@ -5,6 +5,36 @@ from ptcg.engine import BattleSession, load_sample_deck, random_picks
 from ptcg.simsearch import SearchSession
 
 
+def _mid_game_session(max_tries=6):
+    """A live mid-game battle parked on a usable probe state, or skip.
+
+    Usable = game not over, select is not a deck-look (select["deck"] is
+    None, so the too-short your_deck probe is meaningful), and our
+    deckCount > 0. The engine's internal RNG is unseedable, so a fixed
+    python seed does not give a fixed trajectory; retry a few fresh
+    battles until one parks on a usable state.
+    """
+    deck = load_sample_deck()
+    for t in range(max_tries):
+        sess = BattleSession(deck, deck)
+        rng = random.Random(7 + t)
+        for _ in range(30):
+            if sess.done:
+                break
+            sess.select(random_picks(sess.obs, rng))
+        for _ in range(10):   # walk off deck-look selects if parked on one
+            if sess.done or sess.obs["select"].get("deck") is None:
+                break
+            sess.select(random_picks(sess.obs, rng))
+        me = sess.obs["current"]["yourIndex"] if not sess.done else None
+        if (not sess.done
+                and sess.obs["select"].get("deck") is None
+                and sess.obs["current"]["players"][me]["deckCount"] > 0):
+            return sess, deck
+        sess.close()
+    raise AssertionError("no usable mid-game state in %d tries" % max_tries)
+
+
 def _truth_det(sess, obs):
     """Determinization from visualize_data ground truth (test-only)."""
     viz = sess.viz_current()
@@ -22,15 +52,8 @@ def _truth_det(sess, obs):
 
 
 def test_search_session_round_trip_and_errors():
-    deck = load_sample_deck()
-    sess = BattleSession(deck, deck)
-    rng = random.Random(7)
+    sess, deck = _mid_game_session()
     try:
-        for _ in range(30):
-            if sess.done:
-                break
-            sess.select(random_picks(sess.obs, rng))
-        assert not sess.done
         obs = sess.obs
         det = _truth_det(sess, obs)
         ss = SearchSession()
