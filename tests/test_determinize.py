@@ -96,6 +96,14 @@ def test_determinizations_consistent_and_engine_accepted():
             hand_c = Counter(det.opp_hand)
             for cid, n in belief.opp_hand.items():
                 assert hand_c[cid] >= n, (cid, n, hand_c)
+            # hidden-pool membership: pool cards are in hand+deck, never prized
+            hdk = Counter(det.opp_hand) + Counter(det.opp_deck)
+            for cid, nmin in belief.opp_hidden_pool.items():
+                assert hdk[cid] >= nmin, (cid, nmin, hdk)
+            # known-deck membership is a hard minimum of the sampled deck
+            dkc = Counter(det.opp_deck)
+            for cid, nmin in belief.opp_deck.items():
+                assert dkc[cid] >= nmin, (cid, nmin, dkc)
             # revealed opp prizes preserved at their indices
             for j, c in enumerate(obs["current"]["players"][1 - me]["prize"] or []):
                 if c is not None:

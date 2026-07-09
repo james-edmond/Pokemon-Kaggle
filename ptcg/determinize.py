@@ -219,7 +219,8 @@ def _sample(obs, me, my_deck, belief, dl_lam, hd_lam, tables, rng):
 
     # zone assignment: known hand first, hd_lam weights the rest of the hand
     hand = [cid for cid, n in kh.items() for _ in range(n)][:n_hand]
-    cand = [cid for cid, n in kp.items() for _ in range(n)] + unknown
+    pool_items = [cid for cid, n in kp.items() for _ in range(n)]
+    cand = pool_items + unknown              # order marks provenance
     need = n_hand - len(hand)
     if need > 0:
         hw = [(float(hd_lam[c + N_RESERVED]) if hd_lam is not None
@@ -227,19 +228,30 @@ def _sample(obs, me, my_deck, belief, dl_lam, hd_lam, tables, rng):
               for c in cand]
         idx = set(_pick_indices(hw, need, rng))
         hand += [cand[i] for i in sorted(idx)]
-        cand = [cand[i] for i in range(len(cand)) if i not in idx]
+        rem_pool = [cand[i] for i in range(len(pool_items)) if i not in idx]
+        rem_unknown = [cand[i] for i in range(len(pool_items), len(cand))
+                       if i not in idx]
+    else:
+        rem_pool, rem_unknown = pool_items, list(unknown)
     while len(hand) < n_hand:
         hand.append(filler)
     hand = hand[:n_hand]
 
+    # deck: known-deck minimums, then ALL leftover pool cards (pool means
+    # hand-or-deck membership - never prized), then unknowns; prizes draw
+    # only from unknowns. Pool overflow past deck capacity (impossible
+    # unless the tracker overcounts) spills to the prize pool defensively.
     known_deck_list = [cid for cid, n in kd.items() for _ in range(n)]
-    rng.shuffle(cand)
-    used_for_deck = max(0, n_deck_o - len(known_deck_list))
-    deck = known_deck_list + cand[:used_for_deck]
-    rest = cand[used_for_deck:]
+    rng.shuffle(rem_unknown)
+    deck = known_deck_list + rem_pool
+    space = n_deck_o - len(deck)
+    deck += rem_unknown[:max(0, space)]
+    rest = rem_unknown[max(0, space):]
+    if len(deck) > n_deck_o:
+        rest = deck[n_deck_o:] + rest
+        deck = deck[:n_deck_o]
     while len(deck) < n_deck_o:
         deck.append(filler)
-    deck = deck[:n_deck_o]
 
     prize_pool = rest
     while len(prize_pool) < n_unrev_o:
@@ -265,8 +277,9 @@ def _sample(obs, me, my_deck, belief, dl_lam, hd_lam, tables, rng):
         if not has_basic and deck:
             deck[-1] = _fallback_basic(tables)
 
-    decklist = ([c for c in vis.elements()] + hand + deck
-                + [c for c in opp_prize])
+    filled_prizes = [x for slot, x in zip(opp_prize_l, opp_prize)
+                     if slot is None]
+    decklist = ([c for c in vis.elements()] + hand + deck + filled_prizes)
     while len(decklist) < 60:
         decklist.append(filler)
     decklist = decklist[:60]
