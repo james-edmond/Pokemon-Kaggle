@@ -89,7 +89,7 @@ Per-move data flow in `submission_src/main.py`:
 1. tracker update (existing, unchanged);
 2. trivial-select fast path: exactly one legal pick-list → answer immediately (no NN);
 3. featurize root once → one trunk encode → root priors + `aux_decklist`/`aux_hand` λs off
-   that single trunk (no extra NN cost);
+   that single trunk (no additional trunk encodes; multi-pick roots add decoder passes only);
 4. sample K determinizations → K × `search_begin`;
 5. PUCT simulations round-robin across trees until the move's time slice expires;
 6. root vote: sum visit counts per canonical pick-list across trees (root action space is
@@ -150,7 +150,9 @@ validates), all real card IDs.
   and caches the child (standard determinized-UCT bias, mitigated by K independent trees
   and the engine re-sampling per tree).
 - **Root decision**: argmax over canonical pick-list keys of ΣN across trees, ties by
-  ΣW/ΣN; deterministic (no temperature, no Dirichlet).
+  ΣW/ΣN; deterministic (no temperature, no Dirichlet). Canonical key = the exact pick
+  tuple, order-preserving — safe for order-sensitive contexts (e.g. SKILL_ORDER), at worst
+  splitting votes between equivalent orderings.
 - Defaults (runtime-tunable constants): K=6 trees, ≤64 simulations/tree, leaf eval B=1
   (batched B=4 collate is a measured 1.7× — deferred optimization).
 
@@ -185,7 +187,9 @@ load and non-search moves also drain the real bank, hence the margin).
   move_no)))`-style fixed scheme for reproducibility.
 - Telemetry to stderr: per-game counters (moves searched, sims run, fallbacks, time spent) —
   visible in Kaggle agent logs, no contract change.
-- Per-game reset on `select is None` also resets clock/counters (existing reset hook).
+- Per-game reset on `select is None` resets per-game counters, but the time bank is
+  **process-lifetime** (spent time only accumulates): if Kaggle ever runs multiple games in
+  one agent process, the budget can never reset upward mid-episode.
 
 ## Packaging
 
