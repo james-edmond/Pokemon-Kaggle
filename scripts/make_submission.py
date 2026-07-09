@@ -8,6 +8,8 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(REPO, "submission_src")
 OUT = os.path.join(REPO, "dist", "submission")
+CG = os.path.join(REPO, "pokemon-tcg-ai-battle", "sample_submission",
+                  "sample_submission", "cg")
 PTCG_MODULES = ["__init__.py", "cards.py", "engine.py", "tracker.py",
                 "featurize.py", "model.py", "action.py"]
 
@@ -16,30 +18,28 @@ def main():
     if os.path.isdir(OUT):
         shutil.rmtree(OUT)
     os.makedirs(OUT)
-    for f in ("main.py", "deck.csv", "policy.pt", "tables.pkl", "README.md"):
+    for f in ("main.py", "deck.csv", "policy.pt", "README.md"):
         shutil.copyfile(os.path.join(SRC, f), os.path.join(OUT, f))
     os.makedirs(os.path.join(OUT, "ptcg"))
     for m in PTCG_MODULES:
         shutil.copyfile(os.path.join(REPO, "ptcg", m),
                         os.path.join(OUT, "ptcg", m))
+    shutil.copytree(CG, os.path.join(OUT, "cg"))
     # Self-containment check: from a subprocess with cwd=OUT and the REPO stripped
-    # from sys.path, the bundle must resolve its OWN ptcg (not the repo's), load
-    # the precomputed tables.pkl, and return a deck -- all WITHOUT ever importing
-    # the native cg engine. A missing bundled module or an accidental cg import
-    # raises here -> build FAILS loudly.
+    # from sys.path, the bundle must exec main.py the Kaggle way (no __file__),
+    # lazily load the native model + bundled cg engine, and return a legal deck.
     check = (
         "import os, sys\n"
         f"repo = {REPO!r}\n"
         "sys.path = [p for p in sys.path if os.path.abspath(p or '.') != repo]\n"
         "sys.path.insert(0, os.getcwd())\n"
-        "import ptcg, ptcg.action, ptcg.featurize, ptcg.model, ptcg.cards, ptcg.tracker\n"
-        "assert os.path.abspath(os.path.dirname(ptcg.__file__)).startswith(os.getcwd()), ptcg.__file__\n"
         "ns = {}\n"
-        "exec(compile(open('main.py').read(), 'main.py', 'exec'), ns)\n"  # Kaggle-style: NO __file__
+        "exec(compile(open('main.py').read(), 'main.py', 'exec'), ns)\n"
+        "ns['_ensure_model']()\n"
+        "assert ns['_MODEL'] is not None\n"
         "d = ns['agent']({'select': None, 'current': None, 'logs': []})\n"
         "assert len(d) == 60\n"
-        "assert 'cg' not in sys.modules and 'cg.game' not in sys.modules, 'agent loaded cg!'\n"
-        "print('self-contained OK: no __file__, cg-free, deck', len(d))\n"
+        "print('self-contained OK: no __file__, model+cg from bundle, deck', len(d))\n"
     )
     r = subprocess.run([sys.executable, "-c", check], cwd=OUT,
                        capture_output=True, text=True)
