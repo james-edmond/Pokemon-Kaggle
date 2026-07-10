@@ -54,6 +54,51 @@ def _mk_root(session):
     return root
 
 
+class _FakeSession3Ply:
+    """3-ply game for the phase-consistent leaf rule.
+    root sid 0 (me, seat 0) -(1,)-> sid 2 (opponent, seat 1, non-terminal)
+    -(1,)-> sid 4 (me, seat 0, non-terminal)."""
+
+    def __init__(self):
+        self.tree = {
+            (0, (1,)): (2, _obs(seat=1, result=-1)),
+            (2, (1,)): (4, _obs(seat=0, result=-1)),
+        }
+
+    def step(self, sid, picks):
+        return self.tree.get((sid, tuple(picks)))
+
+    def end(self):
+        pass
+
+
+class _FakeSessionOppTerminal:
+    """root (me) -(1,)-> opponent node -(0,)-> TERMINAL, opponent wins."""
+
+    def __init__(self):
+        self.tree = {
+            (0, (1,)): (2, _obs(seat=1, result=-1)),
+            (2, (0,)): (3, _obs(seat=1, result=1)),
+        }
+
+    def step(self, sid, picks):
+        return self.tree.get((sid, tuple(picks)))
+
+    def end(self):
+        pass
+
+
+class _FakeSessionInfiniteCorridor:
+    """Every step returns a fresh non-terminal opponent-seat obs: an engine
+    turn that (hypothetically) never ends, to exercise the depth bound."""
+
+    def step(self, sid, picks):
+        return (0, _obs(seat=1, result=-1))
+
+    def end(self):
+        pass
+
+
 def test_select_action_puct_math():
     root = _mk_root(_FakeSession())
     root.N = [3, 1]
@@ -67,19 +112,53 @@ def test_select_action_puct_math():
 
 
 def test_simulate_backs_up_negamax(monkeypatch):
-    # opponent leaf evaluates +0.9 FOR THE OPPONENT -> -0.9 for me at root
+    # Phase-consistent rule: a leaf value is only trustworthy read from MY
+    # seat (the value head has a turn-phase level shift between turn-start
+    # and mid-turn reads). An opponent node is expanded for actions/priors
+    # only -- its v (0.77) must be discarded, not backed up in either sign
+    # -- and the descent continues (via PUCT on the freshly expanded, all
+    # -zero-N node) down to a my-seat leaf, whose v (0.9) is the one and
+    # only value that gets backed up, my-phase-consistent at every level.
     def fake_eval(model, obs, seat, deck, belief, tables, gen, m):
-        return [(0,), (1,)], [0.5, 0.5], 0.9
+        if obs["current"]["yourIndex"] == 1:        # opponent node
+            return [(0,), (1,)], [0.0, 1.0], 0.77    # v must be ignored
+        return [(0,)], [1.0], 0.9                    # my node: real leaf v
     monkeypatch.setattr(M, "_eval_state", fake_eval)
-    sess = _FakeSession()
+    sess = _FakeSession3Ply()
     root = _mk_root(sess)
-    # force the (1,) branch: bias priors
-    root.P = [0.0, 1.0]
+    root.P = [0.0, 1.0]                              # force branch (1,)
     ran = M._simulate(root, 0, [3] * 60, [3] * 60, None, None, sess, None,
                       M.SearchConfig())
     assert ran
     assert root.N == [0, 1]
-    assert abs(root.W[1] - (-0.9)) < 1e-9      # flipped into my perspective
+    # my-phase leaf value (+0.9), NOT -0.77 (opponent's raw v, sign-flipped)
+    # and NOT -0.9 (a joint leaf+backup double sign-flip of the my-leaf v)
+    assert abs(root.W[1] - 0.9) < 1e-9
+
+    opp_node = root.children[1]
+    assert opp_node.actions == [(0,), (1,)]          # expanded, not a leaf
+    assert opp_node.N == [0, 1]
+    assert abs(opp_node.W[1] - (-0.9)) < 1e-9         # negamax from its seat
+
+    my_leaf = opp_node.children[1]
+    assert my_leaf.actions == [(0,)]                 # populated from my eval
+
+
+def test_simulate_opp_node_never_evaluated_as_leaf(monkeypatch):
+    # The opp node's own eval value (0.9) must never reach any W: only the
+    # exact terminal outcome one ply further may back up a value.
+    monkeypatch.setattr(M, "_eval_state",
+                        lambda *a: ([(0,)], [1.0], 0.9))
+    sess = _FakeSessionOppTerminal()
+    root = _mk_root(sess)
+    root.P = [0.0, 1.0]                              # force branch (1,)
+    M._simulate(root, 0, [3] * 60, [3] * 60, None, None, sess, None,
+                M.SearchConfig())
+    assert root.N == [0, 1]
+    assert abs(root.W[1] - (-1.0)) < 1e-9             # exact terminal, not 0.9
+    opp_node = root.children[1]
+    assert opp_node.N == [1]
+    assert abs(opp_node.W[0] - 1.0) < 1e-9             # negamax of the -1.0
 
 
 def test_simulate_terminal_and_dead_edge(monkeypatch):
@@ -100,6 +179,23 @@ def test_simulate_terminal_and_dead_edge(monkeypatch):
     M._simulate(root2, 0, [3] * 60, [3] * 60, None, None, sess, None,
                 M.SearchConfig())
     assert root2.N[0] == 1 and root2.W[0] == 0.0
+
+
+def test_simulate_depth_bound_neutral(monkeypatch):
+    # An engine turn is finite, but the descent must not hang if it isn't:
+    # a corridor of ever-fresh opponent-seat nodes never reaches a my-seat
+    # leaf or a terminal, so the depth bound must cut it off and back up a
+    # neutral 0.0 instead of looping forever.
+    monkeypatch.setattr(M, "_eval_state",
+                        lambda *a: ([(0,)], [1.0], 0.9))
+    sess = _FakeSessionInfiniteCorridor()
+    root = _mk_root(sess)
+    root.P = [0.0, 1.0]                              # force branch (1,)
+    ran = M._simulate(root, 0, [3] * 60, [3] * 60, None, None, sess, None,
+                      M.SearchConfig())
+    assert ran
+    assert root.N[1] == 1
+    assert root.W[1] == 0.0
 
 
 def test_vote_sums_across_trees_and_breaks_ties_by_value():

@@ -2,14 +2,20 @@
 
 One PUCT tree per determinization; root actions/priors are shared (the
 root select is the real one in every tree). Values are stored from each
-node's acting seat and negamax-flipped on backup; leaves are evaluated by
-the policy's public_value head from the acting seat's perspective, with
-the same information structure the net trained on (that seat's belief
-tracker + decklist). Chance (draws/shuffles/coins) stays implicit: each
-expansion samples one outcome and caches it (determinized-UCT bias,
-mitigated by the K independent trees). The root decision is the argmax of
-summed visit counts across trees over exact pick tuples (order-preserving,
-safe for order-sensitive contexts, at worst splitting equivalent votes).
+node's acting seat and negamax-flipped on backup; a leaf's public_value is
+only ever trusted at a MY-seat node -- the value head has a systematic
+turn-phase level shift (turn-start reads |v|~0.9 for comparable advantage
+vs ~0.6 mid-turn), so comparing values across phases biased the search
+toward passive, turn-ending lines. Opponent nodes are still expanded (for
+their actions/priors, with the same acting-seat information structure the
+net trained on: that seat's belief tracker + decklist) but their value is
+discarded and the descent continues through them, so every backed-up
+value is my-phase or an exact terminal. Chance (draws/shuffles/coins)
+stays implicit: each expansion samples one outcome and caches it
+(determinized-UCT bias, mitigated by the K independent trees). The root
+decision is the argmax of summed visit counts across trees over exact
+pick tuples (order-preserving, safe for order-sensitive contexts, at
+worst splitting equivalent votes).
 """
 import math
 import time
@@ -161,14 +167,25 @@ def _select_action(node, c_puct):
 
 def _simulate(root, me, my_deck, opp_decklist, model, tables, session, gen,
               cfg):
-    """One PUCT simulation: descend, expand/evaluate one leaf, back up."""
+    """One PUCT simulation: descend, expand nodes, back up one my-phase value.
+
+    A leaf's public_value is only read at a my-seat node: the value head
+    has a turn-phase level shift (turn-start |v|~0.9 vs ~0.6 mid-turn for
+    comparable advantage), so comparing it across phases biased the search
+    toward passive, turn-ending lines. An opponent node is expanded for its
+    actions/priors only (its value is discarded) and the descent continues
+    through it by PUCT, so every backed-up value is my-phase or an exact
+    terminal/dead-edge. A depth bound backs up a neutral 0.0 instead of
+    hanging if that never happens (it shouldn't: engine turns are finite).
+    """
     path = []
     node = root
-    while True:
+    v_me = 0.0
+    for _ in range(64):
         if node.term_v is not None:
             v_me = node.term_v
             break
-        if node.actions is None:            # unexpanded: evaluate + stop
+        if node.actions is None:            # unexpanded: evaluate
             seat = node.seat
             deck = my_deck if seat == me else opp_decklist
             belief = node.trk[seat].snapshot()
@@ -186,8 +203,11 @@ def _simulate(root, me, my_deck, opp_decklist, model, tables, session, gen,
             node.P = priors
             node.N = [0] * len(actions)
             node.W = [0.0] * len(actions)
-            v_me = v if seat == me else -v
-            break
+            if seat == me:                  # my-phase leaf: stop here
+                v_me = v
+                break
+            # opponent node: v is off-phase -- discard it and keep
+            # descending (below) via PUCT on the freshly expanded node
         a = _select_action(node, cfg.c_puct)
         path.append((node, a))
         child = node.children.get(a)
@@ -207,6 +227,8 @@ def _simulate(root, me, my_deck, opp_decklist, model, tables, session, gen,
                                   _child_trackers(node.trk, obs))
             node.children[a] = child
         node = child
+    else:
+        v_me = 0.0                          # depth bound exhausted: neutral
     for n, a in path:
         n.N[a] += 1
         n.W[a] += v_me if n.seat == me else -v_me
