@@ -146,6 +146,18 @@ validates), all real card IDs.
   Terminals: exact +1/0/−1 from `result`. The opponent is thus played by the same policy
   with the same information structure it trained on (empty opponent tracker at root —
   approximation, documented).
+- **AMENDED 2026-07-09 (evidence-driven, post-implementation): phase-consistent leaf
+  evaluation.** Live evals showed the original any-node leaf rule LOSES to the raw policy
+  (wr 0.42 at 29 sims/move, 0.36 at 114 — worse with more sims). Root cause (audits in
+  `.superpowers/sdd/progress.md`): the public value head has a systematic turn-phase level
+  shift (winning side's turn-start states read |v|≈0.9 vs ~0.6 for comparable mid-turn
+  states), so comparing leaf values across turn phases biased the search toward passive
+  turn-ending lines whenever ahead. Amended rule: **only my-acting nodes and terminals are
+  evaluation leaves**; opponent nodes expand with policy priors as before but their value
+  is discarded — the descent continues through the opponent's turn (fresh nodes pick their
+  max-prior action) until a my-phase state or terminal, with a 64-ply per-simulation depth
+  guard backing up a neutral 0.0. All Q comparisons are therefore same-phase. Verified:
+  identical 100-game probe went from wr 0.420 [0.328,0.518] to **0.620 [0.522,0.709]**.
 - **Chance**: implicit — each expansion samples one stochastic outcome (draw/shuffle/coin)
   and caches the child (standard determinized-UCT bias, mitigated by K independent trees
   and the engine re-sampling per tree).
