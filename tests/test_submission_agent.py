@@ -73,3 +73,46 @@ def test_agent_loads_under_exec_without_dunder_file():
         assert isinstance(deck, list) and len(deck) == 60
     finally:
         os.chdir(cwd)
+
+
+def test_search_disabled_flag_and_knobs_exist():
+    mod = _load_agent()
+    assert mod._SEARCH_ENABLED is True
+    mod._configure_search(cap_s=0.5, k_trees=2, sims_per_tree=4, bank_s=100.0)
+    assert mod._CLOCK.cap_s == 0.5 and mod._CLOCK.bank_s == 100.0
+    assert mod._SCFG.k_trees == 2 and mod._SCFG.sims_per_tree == 4
+    mod._reseed(7)                       # must not raise
+    assert set(mod._TELEM) >= {"games", "moves", "searched", "sims",
+                               "fallbacks", "search_time"}
+
+
+def test_trivial_select_fast_path_no_model():
+    mod = _load_agent()
+    # forced single option answered instantly, without loading the model
+    obs = {"select": {"option": [{"type": 0}], "minCount": 1, "maxCount": 1},
+           "current": {"yourIndex": 0, "players": [{}, {}]}, "logs": []}
+    assert mod.agent(obs) == [0]
+    assert mod._MODEL is None            # fast path never touched torch
+    obs2 = {"select": {"option": [{"type": 0}] * 3, "minCount": 3,
+                       "maxCount": 3},
+            "current": {"yourIndex": 0, "players": [{}, {}]}, "logs": []}
+    assert mod.agent(obs2) == [0, 1, 2]
+
+
+def test_search_off_agent_still_never_raises():
+    mod = _load_agent()
+    mod._SEARCH_ENABLED = False
+    obs = {"select": {"option": list(range(5)), "minCount": 1, "maxCount": 2},
+           "logs": []}
+    picks = mod.agent(obs)
+    assert isinstance(picks, list) and 1 <= len(picks) <= 2
+
+
+def test_missing_search_begin_input_skips_search():
+    mod = _load_agent()
+    # search enabled but no sbi: must fall through to policy/fallback with
+    # no exception (this obs also fails featurization -> random legal)
+    obs = {"select": {"option": list(range(4)), "minCount": 1, "maxCount": 1},
+           "current": {"yourIndex": 0, "players": [{}, {}]}, "logs": []}
+    picks = mod.agent(obs)
+    assert isinstance(picks, list) and len(picks) == 1
