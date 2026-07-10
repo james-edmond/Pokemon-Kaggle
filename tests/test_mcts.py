@@ -115,3 +115,95 @@ def test_vote_sums_across_trees_and_breaks_ties_by_value():
     c1, c2 = _mk_root(sess), _mk_root(sess)
     c1.N, c1.W = [2, 2], [1.8, 0.2]
     assert M._vote([(c1, None)]) == (0,)
+
+
+import os
+import random
+
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _search_ready_session(max_tries=6):
+    """A live battle warmed up to a not-done state parked on our own select.
+
+    Returns (sess, tracker, me, deck); raises AssertionError if no fresh
+    battle reaches a usable state within max_tries attempts.
+
+    Mirrors test_simsearch.py's _mid_game_session / test_determinize.py's
+    _probe_session: the engine's internal RNG is unseedable, so a fixed
+    python seed does not give a fixed trajectory, and the random warm-up
+    below occasionally runs the game to completion before parking on our
+    select. Retry with a fresh battle rather than weakening any assertion
+    on the probed state itself.
+    """
+    from ptcg.engine import BattleSession, load_sample_deck, random_picks
+    from ptcg.tracker import BeliefTracker
+
+    deck = load_sample_deck()
+    for t in range(max_tries):
+        sess = BattleSession(deck, deck)
+        keep = False
+        try:
+            rng = random.Random(21 + t)
+            me = sess.obs["current"]["yourIndex"]
+            tracker = BeliefTracker(me)
+            for _ in range(20):
+                if sess.done:
+                    break
+                if sess.obs["current"]["yourIndex"] == me:
+                    tracker.update(sess.obs.get("logs") or [])
+                sess.select(random_picks(sess.obs, rng))
+            while sess.obs["current"]["yourIndex"] != me and not sess.done:
+                sess.select(random_picks(sess.obs, rng))
+            if sess.done:
+                continue
+            tracker.update(sess.obs.get("logs") or [])
+            keep = True
+            return sess, tracker, me, deck
+        finally:
+            if not keep:
+                sess.close()
+    raise AssertionError("no usable pre-search state in %d tries" % max_tries)
+
+
+def test_search_move_live_engine_legal_and_budgeted():
+    import torch
+
+    from ptcg.cards import build_tables
+    from ptcg.model import PolicyModel, student_config
+    from ptcg.simsearch import SearchSession
+
+    tables = build_tables()
+    model = PolicyModel(student_config(tables))
+    model.load_state_dict(torch.load(
+        os.path.join(_REPO, "submission_src", "policy.pt"),
+        map_location="cpu", weights_only=True))
+    model.eval()
+
+    sess, tracker, me, deck = _search_ready_session()
+    try:
+        obs = sess.obs
+
+        ss = SearchSession()
+        cfg = M.SearchConfig(k_trees=2, sims_per_tree=8)
+        gen = torch.Generator().manual_seed(0)
+        t0 = __import__("time").perf_counter()
+        picks, stats = M.search_move(obs, me, deck, tracker, model, tables,
+                                     ss, cfg, random.Random(1), gen,
+                                     tslice=4.0)
+        dt = __import__("time").perf_counter() - t0
+        sel = obs["select"]
+        if stats.searched:
+            assert isinstance(picks, list)
+            assert sel["minCount"] <= len(picks) <= sel["maxCount"]
+            assert len(set(picks)) == len(picks)
+            assert all(0 <= p < len(sel["option"]) for p in picks)
+            assert stats.sims >= 1 and stats.trees >= 1
+        else:
+            # single-action selects shortcut without searching
+            assert stats.reason == "single-action" and picks is not None
+        # slice + one leaf-eval of overshoot is the budget contract
+        assert dt < 4.0 + 2.5, f"took {dt:.1f}s"
+        assert stats.elapsed <= dt
+    finally:
+        sess.close()
