@@ -8,6 +8,15 @@ mid-episode.
 """
 
 OPT_ATTACK = 13  # cg OptionType.ATTACK
+OPT_SKILL = 15   # cg OptionType.SKILL: "select the order of card skills"
+
+# select.context values where the pick SEQUENCE may itself encode a decision
+# (ordering/placement), not just which items are taken -- a take-all cannot
+# be collapsed to ascending indices here, so defer to policy/search instead.
+CTX_TO_DECK = 9
+CTX_TO_DECK_BOTTOM = 10
+CTX_SKILL_ORDER = 34
+_ORDER_SEMANTIC_CONTEXTS = (CTX_TO_DECK, CTX_TO_DECK_BOTTOM, CTX_SKILL_ORDER)
 
 
 def forced_picks(select):
@@ -17,15 +26,30 @@ def forced_picks(select):
       one option with at least one pick required        -> [0]
       must take every option (min == max == len(option)) -> [0..n-1]
     nopt==1 with minCount==0 is a real choice ([] vs [0]), not trivial.
+
+    Take-all (min == max == n) is only trivial when pick ORDER cannot
+    matter. Some selects are order-semantic -- the context is one of
+    _ORDER_SEMANTIC_CONTEXTS, or an option is type SKILL (order of skills
+    to resolve) -- and for those, forcing ascending order would silently
+    override a real decision the policy/search should make; return None.
     """
     try:
-        n = len(select["option"])
+        options = select["option"]
+        n = len(options)
         lo, hi = int(select["minCount"]), int(select["maxCount"])
     except Exception:
         return None
     if n == 1 and lo >= 1 and hi >= 1:
         return [0]
     if n > 0 and lo == hi == n:
+        try:
+            if select.get("context") in _ORDER_SEMANTIC_CONTEXTS:
+                return None
+            if any(isinstance(o, dict) and o.get("type") == OPT_SKILL
+                   for o in options):
+                return None
+        except Exception:
+            return None
         return list(range(n))
     return None
 

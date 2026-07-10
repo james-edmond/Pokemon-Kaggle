@@ -21,6 +21,27 @@ def test_forced_picks_real_choices_return_none():
     assert forced_picks({"option": []}) is None     # malformed: no crash
 
 
+def test_forced_picks_defers_order_semantic_take_alls():
+    # SKILL options (type 15): order is the decision -> not forced
+    sel = {"option": [{"type": 15}, {"type": 15}], "minCount": 2, "maxCount": 2,
+           "context": 34}
+    assert forced_picks(sel) is None
+    # TO_DECK_BOTTOM context: pick sequence may encode placement -> not forced
+    sel2 = {"option": [{"type": 3}] * 3, "minCount": 3, "maxCount": 3,
+            "context": 10}
+    assert forced_picks(sel2) is None
+    sel3 = {"option": [{"type": 3}] * 3, "minCount": 3, "maxCount": 3,
+            "context": 9}
+    assert forced_picks(sel3) is None
+    # plain take-all (e.g. DISCARD context) still forced
+    sel4 = {"option": [{"type": 3}] * 3, "minCount": 3, "maxCount": 3,
+            "context": 8}
+    assert forced_picks(sel4) == [0, 1, 2]
+    # missing context key: treated as order-safe (backward compatible)
+    sel5 = {"option": [{"type": 3}] * 3, "minCount": 3, "maxCount": 3}
+    assert forced_picks(sel5) == [0, 1, 2]
+
+
 def test_slice_basics_and_importance():
     c = SearchClock(bank_s=480.0, floor_s=60.0, cap_s=20.0, expected_total_moves=80)
     base = c.slice_for(_sel(3, 1, 1))

@@ -1,7 +1,6 @@
 import os
 import random
 import sys
-import time
 
 
 def _agent_dir():
@@ -101,13 +100,19 @@ def _reseed(seed):
 
 
 def _flush_telemetry():
-    if _TELEM["moves"]:
-        print("[agent] games=%d moves=%d searched=%d sims=%d fallbacks=%d "
-              "search_time=%.1fs" % (_TELEM["games"], _TELEM["moves"],
-                                     _TELEM["searched"], _TELEM["sims"],
-                                     _TELEM["fallbacks"],
-                                     _TELEM["search_time"]),
-              file=sys.stderr, flush=True)
+    # Runs in the select-is-None branch OUTSIDE the agent's try/except
+    # ladder (see agent() below) -- a stderr print must never be able to
+    # raise and take the whole submission down with it.
+    try:
+        if _TELEM["moves"]:
+            print("[agent] games=%d moves=%d searched=%d sims=%d fallbacks=%d "
+                  "search_time=%.1fs" % (_TELEM["games"], _TELEM["moves"],
+                                         _TELEM["searched"], _TELEM["sims"],
+                                         _TELEM["fallbacks"],
+                                         _TELEM["search_time"]),
+                  file=sys.stderr, flush=True)
+    except Exception:
+        pass
 
 
 def _fallback(obs_dict):
