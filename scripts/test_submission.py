@@ -43,18 +43,26 @@ def play(mod, my_seat, my_deck, opp_deck, seed):
 
 
 def main():
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 6
+    args = [a for a in sys.argv[1:]]
+    small_search = "--small-search" in args
+    args = [a for a in args if not a.startswith("--")]
+    n = int(args[0]) if args else 6
     mod = load_agent()
-    # The agent's OWN deck is what it declares at deck selection; the engine deals it
-    # that deck, so the smoke must play my_deck = the declared deck (NOT the sample deck),
-    # or featurization would mismatch the dealt cards once deck.csv changes in Task 3.
+    if small_search:
+        # tiny budgets: search on every eligible move, fast wall-clock
+        mod._configure_search(cap_s=0.6, k_trees=2, sims_per_tree=8,
+                              bank_s=10_000.0)
+    # The agent's OWN deck is what it declares at deck selection; the engine
+    # deals it that deck, so the smoke must play my_deck = the declared deck.
     my_deck = mod.agent({"select": None, "current": None, "logs": []})
     assert len(my_deck) == 60
     opp_deck = load_sample_deck()   # a fixed opponent deck for the smoke
     wins, done, all_lat = 0, 0, []
     for g in range(n):
         my_seat = g % 2
-        mod.agent({"select": None, "current": None, "logs": []})  # reset per-game state
+        mod.agent({"select": None, "current": None, "logs": []})
+        if hasattr(mod, "_reseed"):
+            mod._reseed(1000 + g)
         result, lat = play(mod, my_seat, my_deck, opp_deck, seed=1000 + g)
         done += 1
         if result == my_seat:
@@ -65,7 +73,14 @@ def main():
     p95 = all_lat[int(len(all_lat) * 0.95)]
     print(f"games={done} wins={wins} winrate={wins/done:.3f} "
           f"moves={len(all_lat)} latency p50={p50*1000:.1f}ms p95={p95*1000:.1f}ms")
-    print("OK — all agent picks legal, all games completed" if done == n else "INCOMPLETE")
+    if small_search:
+        t = mod._TELEM
+        print(f"telemetry: searched={t['searched']} sims={t['sims']} "
+              f"fallbacks={t['fallbacks']} search_time={t['search_time']:.1f}s")
+        assert t["searched"] > 0, "search never ran in --small-search mode"
+        assert p95 < 5.0, f"p95 latency {p95:.1f}s exceeds small-search bound"
+    print("OK — all agent picks legal, all games completed" if done == n
+          else "INCOMPLETE")
 
 
 if __name__ == "__main__":
