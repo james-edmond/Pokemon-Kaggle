@@ -101,7 +101,9 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--games-search", type=int, default=300)
     ap.add_argument("--games-raw", type=int, default=60)
-    ap.add_argument("--anchor", default="champ/phase3-generalist-r120.pt")
+    ap.add_argument("--anchor",
+                    default=os.path.join(REPO, "champ",
+                                         "phase3-generalist-r120.pt"))
     ap.add_argument("--anchor-games", type=int, default=60)
     ap.add_argument("--k", type=int, default=3)
     ap.add_argument("--sims", type=int, default=24)
@@ -127,11 +129,15 @@ def main():
                                    "random"))
     vs_random = block(w, n)
     anchor = {}
-    if a.anchor and os.path.exists(a.anchor):
-        w, n = _pool_run(_search_chunk, a.anchor_games, a.workers,
-                         lambda i, g: (g, a.seed + 3000 + 100 * i,
-                                       a.candidate, a.anchor, a.k, a.sims))
-        anchor = block(w, n)
+    if a.anchor:
+        if os.path.exists(a.anchor):
+            w, n = _pool_run(_search_chunk, a.anchor_games, a.workers,
+                             lambda i, g: (g, a.seed + 3000 + 100 * i,
+                                           a.candidate, a.anchor, a.k, a.sims))
+            anchor = block(w, n)
+        else:
+            print("gate_ei: WARNING anchor missing, anchor leg skipped: "
+                  f"{a.anchor}", file=sys.stderr)
     promote = (search_h2h["lo"] > 0.50
                and vs_random["wr"] >= 0.85
                and (not anchor or anchor["wr"] >= 0.55))

@@ -7,7 +7,10 @@ from the acting seat, on EVERY state including turn-starts (recalibrates
 the phase-4-diagnosed turn-phase artifact). Aux heads keep their phase-2
 Poisson/MSE targets — the determinizer's accuracy is a search input.
 """
+import glob
+import gzip
 import math
+import os
 import random
 from dataclasses import dataclass
 
@@ -223,3 +226,128 @@ def train_ei(policy, games, tables, cfg, incumbent=None):
             "loss_aux": agg["loss_aux"] / max(n_va, 1),
             "n_single": len(singles), "n_multi": len(multis),
             "n_valueonly": len(vonly), "epochs_ran": cfg.epochs}
+
+
+# ---- streaming trainer (RAM bounded by one batch file) ---------------------
+
+
+def iter_game_files(dirs):
+    """Sorted game-file list across dirs, both extensions (.pt and .pt.gz)."""
+    files = []
+    for d in dirs:
+        files.extend(glob.glob(os.path.join(d, "worker-*.pt")))
+        files.extend(glob.glob(os.path.join(d, "worker-*.pt.gz")))
+    return sorted(files)
+
+
+def load_game_file(path):
+    """Load one batch file -> list[EIGame], gzip-aware by extension.
+
+    Repads every step's public and privileged TokenizedState back to full
+    MAX_TOKENS width (gen_ei stores them storage-trimmed). repad is idempotent
+    on already-full arrays, so legacy uncompressed batches load unchanged.
+    """
+    from .selfplay_search import repad_state
+    if path.endswith(".gz"):
+        with gzip.open(path, "rb") as f:
+            games = torch.load(f, weights_only=False)
+    else:
+        games = torch.load(path, weights_only=False)
+    for g in games:
+        for s in g.steps:
+            s.state = repad_state(s.state)
+            s.priv_state = repad_state(s.priv_state)
+    return games
+
+
+def train_ei_stream(policy, files, tables, cfg, incumbent=None,
+                    replay_files=(), replay_ratio=0.25):
+    """Streaming variant of ``train_ei``: loads one batch file at a time so
+    RAM stays bounded by a single file's games instead of the whole corpus.
+
+    Per epoch the combined file list (fresh + replay) is shuffled with
+    ``random.Random(cfg.seed + epoch)``; each file is loaded, flattened,
+    step-shuffled, and run through the SAME three loss streams as ``train_ei``
+    (``single_pick_loss`` / ``multi_pick_loss`` / ``value_only_loss``) under
+    one AdamW optimizer created once. Replay mixing is a file-COUNT proxy for
+    the move ratio: ``round(replay_ratio * len(fresh files))`` replay files are
+    appended (approximation — files vary in move count, so the realized move
+    ratio only tracks replay_ratio when file sizes are comparable). Returns the
+    same metric keys as ``train_ei`` plus ``files_seen`` (per-epoch file count).
+    """
+    dev = torch.device(cfg.device)
+    policy.to(dev)
+    policy.train()
+    if incumbent is not None:
+        incumbent.to(dev)
+        incumbent.eval()
+    files = list(files)
+    replay_files = list(replay_files)
+    n_replay = min(len(replay_files), round(replay_ratio * len(files)))
+    chosen_replay = replay_files[:n_replay]
+    opt = torch.optim.AdamW(policy.parameters(), lr=cfg.lr)
+    agg = {"loss_pi": 0.0, "loss_v": 0.0, "loss_aux": 0.0}
+    n_pi = n_va = 0
+    n_single = n_multi = n_valueonly = 0
+    files_seen = 0
+    for epoch in range(cfg.epochs):
+        rng = random.Random(cfg.seed + epoch)
+        combined = files + chosen_replay
+        rng.shuffle(combined)
+        files_seen = len(combined)  # per-epoch count (constant across epochs)
+        for path in combined:
+            flat = flatten_games(load_game_file(path))
+            singles = [(s, z, od) for s, z, od in flat
+                       if s.actions is not None and is_single_pick(s)]
+            multis = [(s, z, od) for s, z, od in flat
+                      if s.actions is not None and not is_single_pick(s)]
+            vonly = [(s, z, od) for s, z, od in flat if s.actions is None]
+            n_single += len(singles)
+            n_multi += len(multis)
+            n_valueonly += len(vonly)
+            rng.shuffle(singles)
+            rng.shuffle(vonly)
+            for lo in range(0, len(singles), cfg.minibatch):
+                batch = singles[lo:lo + cfg.minibatch]
+                loss, parts = single_pick_loss(
+                    policy, [b[0] for b in batch], [b[1] for b in batch],
+                    [b[2] for b in batch], tables, cfg, incumbent=incumbent)
+                opt.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(policy.parameters(),
+                                               cfg.grad_clip)
+                opt.step()
+                agg["loss_pi"] += parts["loss_pi"]
+                agg["loss_v"] += parts["loss_v"]
+                agg["loss_aux"] += parts["loss_aux"]
+                n_pi += 1
+                n_va += 1
+            for s, z, od in multis:
+                loss, parts = multi_pick_loss(policy, s, z, od, tables, cfg)
+                opt.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(policy.parameters(),
+                                               cfg.grad_clip)
+                opt.step()
+                agg["loss_pi"] += parts["loss_pi"]
+                n_pi += 1
+            for lo in range(0, len(vonly), cfg.minibatch):
+                batch = vonly[lo:lo + cfg.minibatch]
+                loss, parts = value_only_loss(
+                    policy, [b[0] for b in batch], [b[1] for b in batch],
+                    [b[2] for b in batch], tables, cfg)
+                opt.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(policy.parameters(),
+                                               cfg.grad_clip)
+                opt.step()
+                agg["loss_v"] += parts["loss_v"]
+                agg["loss_aux"] += parts["loss_aux"]
+                n_va += 1
+    policy.eval()
+    return {"loss_pi": agg["loss_pi"] / max(n_pi, 1),
+            "loss_v": agg["loss_v"] / max(n_va, 1),
+            "loss_aux": agg["loss_aux"] / max(n_va, 1),
+            "n_single": n_single, "n_multi": n_multi,
+            "n_valueonly": n_valueonly, "epochs_ran": cfg.epochs,
+            "files_seen": files_seen}

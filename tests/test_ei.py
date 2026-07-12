@@ -131,6 +131,35 @@ def test_multi_pick_loss_matches_manual_logprob_weighting():
     assert abs(float(parts["loss_pi"]) - float(manual)) < 1e-4
 
 
+def test_train_ei_stream_over_gzip_batches(tmp_path):
+    import gzip
+
+    from ptcg.ei import iter_game_files, train_ei_stream
+    from ptcg.model import PolicyModel, tiny_config
+    tables = build_tables()
+    torch.manual_seed(2)
+    net = PolicyModel(tiny_config(tables))
+    # two gzip batch files, one game each (mimics gen_ei's on-disk format)
+    d = tmp_path / "data"
+    d.mkdir()
+    for i in range(2):
+        g = _fabricated_game(tables)
+        with gzip.open(d / f"worker-{i}-batch-0.pt.gz", "wb") as f:
+            torch.save([g], f)
+    files = iter_game_files([str(d)])
+    assert len(files) == 2
+    cfg = EIConfig(lr=3e-3, epochs=2, minibatch=8, device="cpu", seed=0)
+    m1 = train_ei_stream(net, files, tables, cfg)
+    m2 = train_ei_stream(net, files, tables, cfg)
+    for k in ("loss_pi", "loss_v", "loss_aux", "n_single", "n_multi",
+              "n_valueonly", "epochs_ran", "files_seen"):
+        assert k in m1
+    # files_seen is a per-epoch count: 2 files, 0 replay -> 2 (not epochs*2)
+    assert m1["files_seen"] == 2
+    assert all(math.isfinite(m1[k]) for k in ("loss_pi", "loss_v", "loss_aux"))
+    assert m2["loss_pi"] < m1["loss_pi"]
+
+
 def test_train_ei_runs_and_improves_on_fabricated_data():
     from ptcg.model import PolicyModel, tiny_config
     from ptcg.ei import train_ei

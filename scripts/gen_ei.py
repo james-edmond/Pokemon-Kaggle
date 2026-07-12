@@ -5,6 +5,7 @@ Usage:
 Writes worker-<i>-batch-<j>.pt (list[EIGame]) and manifest.json when complete.
 Idempotent-ish: refuses to run if manifest.json already exists."""
 import argparse
+import gzip
 import json
 import multiprocessing as mp
 import os
@@ -26,6 +27,13 @@ def load_policy(path, tables):
     m.load_state_dict(sd)
     m.eval()
     return m
+
+
+def _save_batch(buf, path):
+    """gzip-compressed torch.save (states are storage-trimmed upstream)."""
+    import torch
+    with gzip.open(path, "wb") as f:
+        torch.save(buf, f)
 
 
 def _worker(args):
@@ -51,10 +59,10 @@ def _worker(args):
         moves += len(game.steps)
         done += 1
         if len(buf) >= batch:
-            torch.save(buf, os.path.join(out, f"worker-{wid}-batch-{bi}.pt"))
+            _save_batch(buf, os.path.join(out, f"worker-{wid}-batch-{bi}.pt.gz"))
             buf, bi = [], bi + 1
     if buf:
-        torch.save(buf, os.path.join(out, f"worker-{wid}-batch-{bi}.pt"))
+        _save_batch(buf, os.path.join(out, f"worker-{wid}-batch-{bi}.pt.gz"))
     return {"games": done, "moves": moves}
 
 
@@ -87,8 +95,10 @@ def main():
     total = {"games": sum(s["games"] for s in stats),
              "moves": sum(s["moves"] for s in stats),
              "args": vars(a)}
-    with open(mani, "w") as f:
+    tmp = mani + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(total, f, indent=2)
+    os.replace(tmp, mani)
     print(f"gen_ei: {total['games']} games, {total['moves']} moves -> {a.out}")
 
 

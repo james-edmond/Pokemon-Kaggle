@@ -3,10 +3,10 @@ Usage:
   python scripts/train_ei.py --data runs/ei/dev/cycle-0/data \
       --ckpt-in submission_src/policy.pt --ckpt-out runs/ei/dev/cycle-0/ckpt.pt \
       [--replay runs/ei/dev/cycle--1/data] [--replay-ratio 0.25] [--kl-coef 0.02]
-Replay mixing: appends whole games from --replay dirs (oldest-first order
-as globbed) until replay moves ~= replay-ratio * fresh moves."""
+Streaming: batch files are loaded one at a time (RAM bounded by one file).
+Replay mixing is a file-count proxy for the move ratio: ~replay-ratio *
+(fresh file count) replay files (oldest-first as globbed) are appended."""
 import argparse
-import glob
 import json
 import os
 import sys
@@ -25,14 +25,6 @@ def _load_policy(path, tables):
     m.load_state_dict(sd)
     m.eval()
     return m
-
-
-def _load_games(d):
-    import torch
-    out = []
-    for f in sorted(glob.glob(os.path.join(d, "worker-*.pt"))):
-        out.extend(torch.load(f, weights_only=False))
-    return out
 
 
 def main():
@@ -55,24 +47,18 @@ def main():
     import torch
 
     from ptcg.cards import build_tables
-    from ptcg.ei import EIConfig, train_ei
+    from ptcg.ei import EIConfig, iter_game_files, train_ei_stream
     tables = build_tables()
     policy = _load_policy(a.ckpt_in, tables)
     incumbent = _load_policy(a.ckpt_in, tables) if a.kl_coef > 0 else None
-    games = _load_games(a.data)
-    fresh_moves = sum(len(g.steps) for g in games)
-    target = int(fresh_moves * a.replay_ratio)
-    got = 0
-    for rd in a.replay:
-        for g in _load_games(rd):
-            if got >= target:
-                break
-            games.append(g)
-            got += len(g.steps)
+    files = iter_game_files([a.data])
+    replay_files = iter_game_files(a.replay) if a.replay else []
     cfg = EIConfig(lr=a.lr, epochs=a.epochs, minibatch=a.minibatch,
                    pi_temp=a.pi_temp, kl_coef=a.kl_coef, device=a.device,
                    seed=a.seed)
-    metrics = train_ei(policy, games, tables, cfg, incumbent=incumbent)
+    metrics = train_ei_stream(policy, files, tables, cfg,
+                              incumbent=incumbent, replay_files=replay_files,
+                              replay_ratio=a.replay_ratio)
     os.makedirs(os.path.dirname(a.ckpt_out) or ".", exist_ok=True)
     torch.save({"policy": policy.state_dict(),
                 "ei_config": vars(a), "metrics": metrics}, a.ckpt_out)

@@ -64,6 +64,78 @@ def test_play_search_game_records_targets_and_outcome():
     assert valueonly is not None   # trivial/forced moves may or may not occur
 
 
+def _two_real_states(tables):
+    """Two real (public, priv, esel, seat) tuples from a live sample battle."""
+    import numpy as np
+
+    from ptcg.engine import BattleSession, load_sample_deck, random_picks
+    from ptcg.featurize import (encode_select, featurize_privileged,
+                                featurize_state)
+    from ptcg.tracker import BeliefTracker
+    deck = load_sample_deck()
+    out = []
+    s = BattleSession(deck, deck)
+    trk = {0: BeliefTracker(0), 1: BeliefTracker(1)}
+    rng = random.Random(7)
+    try:
+        while len(out) < 2 and not s.done:
+            me = s.obs["current"]["yourIndex"]
+            trk[me].update(s.obs.get("logs") or [])
+            ts = featurize_state(s.obs, me, deck, trk[me].snapshot(), tables)
+            es = encode_select(s.obs, ts, tables)
+            pv = featurize_privileged(s.obs, s.obs, (deck, deck), tables)
+            out.append((me, ts, es, pv))
+            s.select(random_picks(s.obs, rng))
+    finally:
+        s.close()
+    assert len(out) == 2, "sample battle ended before two states"
+    return deck, out
+
+
+def test_trim_state_repad_bit_exact_and_flows_unchanged():
+    import numpy as np
+
+    from ptcg.action import sample_select
+    from ptcg.model import collate_states
+    from ptcg.ppo import aux_targets
+    from ptcg.selfplay_search import repad_state, trim_state
+    tables = build_tables()
+    net = _tiny_net(tables)
+    deck, ((m0, a, ea, pa), (m1, b, eb, pb)) = _two_real_states(tables)
+    fields = ["card", "numeric", "owner", "zone", "kind", "pos", "mask"]
+
+    # (1) repad(trim(.)) is bit-for-bit identical to the original featurization
+    for orig in (a, pa, b, pb):
+        r = repad_state(trim_state(orig))
+        assert r.n == orig.n
+        for f in fields:
+            assert np.array_equal(getattr(r, f), getattr(orig, f)), f
+        # trimming actually shrank the stored arrays
+        assert trim_state(orig).card.shape[0] == orig.n < orig.card.shape[0]
+
+    # (2) collate over repadded-trimmed states == collate over originals
+    c_orig = collate_states([a, b])
+    c_trim = collate_states([repad_state(trim_state(a)),
+                             repad_state(trim_state(b))])
+    for k in c_orig:
+        assert torch.equal(c_orig[k], c_trim[k]), k
+
+    # (3) aux_targets on trimmed priv/public states == on originals
+    orig_steps = [EIStep(m0, a, ea, pa), EIStep(m1, b, eb, pb)]
+    trim_steps = [EIStep(m0, trim_state(a), ea, trim_state(pa)),
+                  EIStep(m1, trim_state(b), eb, trim_state(pb))]
+    opp = [list(deck), list(deck)]
+    for x, y in zip(aux_targets(orig_steps, tables, opp),
+                    aux_targets(trim_steps, tables, opp)):
+        assert torch.equal(x, y)
+
+    # (4) sample_select with a fixed generator returns identical picks
+    d1 = sample_select(net, a, ea, torch.Generator().manual_seed(123))
+    d2 = sample_select(net, repad_state(trim_state(a)), ea,
+                       torch.Generator().manual_seed(123))
+    assert d1.picks == d2.picks
+
+
 def test_play_search_game_record_false_skips_steps():
     tables = build_tables()
     net = _tiny_net(tables)

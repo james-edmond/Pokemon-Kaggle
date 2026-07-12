@@ -10,16 +10,17 @@ distribution (forced picks, single-action shortcuts, search fallbacks)
 are recorded value-only (actions=None): every state still trains the
 value and aux heads. record=False skips recording entirely (gate games).
 """
-import random
 from dataclasses import dataclass
 
-import torch
+import numpy as np
 
 from .action import sample_select
+from .cards import PAD_ROW
 from .clock import forced_picks
 from .engine import BattleSession
-from .featurize import (FEATURIZER_VERSION, encode_select,
-                        featurize_privileged, featurize_state)
+from .featurize import (FEATURIZER_VERSION, MAX_TOKENS, NUM_DIM,
+                        TokenizedState, encode_select, featurize_privileged,
+                        featurize_state)
 from .mcts import search_move
 from .simsearch import SearchSession
 from .tracker import BeliefTracker
@@ -42,6 +43,51 @@ class EIGame:
     rewards: tuple
     decks: tuple
     featurizer_version: int = FEATURIZER_VERSION
+
+
+def trim_state(ts):
+    """Storage-trimmed copy: per-token arrays sliced to ts.n rows.
+
+    featurize builds every per-token array at full MAX_TOKENS capacity and
+    marks the used prefix with ``ts.n``; rows [n:] are never written and hold
+    the builder's init fill. Slicing to [:n] (owned copies, so pickling stores
+    only n rows) drops that slack. Scalar fields, ``ref`` and ``mrow`` are
+    carried unchanged. Reverse with ``repad_state`` before collation.
+    """
+    n = ts.n
+    return TokenizedState(
+        ts.card[:n].copy(), ts.numeric[:n].copy(), ts.owner[:n].copy(),
+        ts.zone[:n].copy(), ts.kind[:n].copy(), ts.pos[:n].copy(),
+        ts.mask[:n].copy(), ts.ref, ts.mrow, n)
+
+
+def repad_state(ts):
+    """Inverse of ``trim_state``: restore full MAX_TOKENS-width per-token arrays.
+
+    Rebuilds each array at capacity with the exact init fill ``_Builder`` uses
+    (card=PAD_ROW, mask=False, everything else 0) and copies the first ts.n
+    rows back. Bit-for-bit identical to the original featurize output because
+    rows [n:] were only ever the init fill. Idempotent on already-full states
+    (repad of a MAX_TOKENS-wide array reproduces it), so the loader can apply
+    it uniformly to trimmed (compressed) and legacy full-width data alike.
+    """
+    n = ts.n
+    card = np.full(MAX_TOKENS, PAD_ROW, np.int64)
+    numeric = np.zeros((MAX_TOKENS, NUM_DIM), np.float32)
+    owner = np.zeros(MAX_TOKENS, np.int64)
+    zone = np.zeros(MAX_TOKENS, np.int64)
+    kind = np.zeros(MAX_TOKENS, np.int64)
+    pos = np.zeros(MAX_TOKENS, np.int64)
+    mask = np.zeros(MAX_TOKENS, bool)
+    card[:n] = ts.card[:n]
+    numeric[:n] = ts.numeric[:n]
+    owner[:n] = ts.owner[:n]
+    zone[:n] = ts.zone[:n]
+    kind[:n] = ts.kind[:n]
+    pos[:n] = ts.pos[:n]
+    mask[:n] = ts.mask[:n]
+    return TokenizedState(card, numeric, owner, zone, kind, pos, mask,
+                          ts.ref, ts.mrow, n)
 
 
 def sample_deck_pair(rng, mirror_frac=0.3):
@@ -113,7 +159,10 @@ def play_search_game(net0, net1, deck_names, tables, *, cfg, rng, gen,
                     actions = list(st.root_actions)
                     visits = [int(v) for v in st.root_visits]
             if record:
-                steps.append(EIStep(me, ts, es, pv, actions, visits))
+                # trim per-token slack out of both featurizations before they
+                # are pickled: full-capacity arrays cost ~83 KB/move.
+                steps.append(EIStep(me, trim_state(ts), es, trim_state(pv),
+                                    actions, visits))
             s.select(list(picks))
         r = s.result
     finally:
