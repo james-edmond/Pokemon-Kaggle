@@ -295,6 +295,11 @@ def test_search_move_live_engine_legal_and_budgeted():
             assert len(set(picks)) == len(picks)
             assert all(0 <= p < len(sel["option"]) for p in picks)
             assert stats.sims >= 1 and stats.trees >= 1
+            assert stats.root_actions is not None
+            assert stats.root_visits is not None
+            assert len(stats.root_actions) == len(stats.root_visits)
+            assert sum(stats.root_visits) == stats.sims
+            assert tuple(picks) in stats.root_actions
         else:
             # single-action selects shortcut without searching
             assert stats.reason == "single-action" and picks is not None
@@ -303,3 +308,21 @@ def test_search_move_live_engine_legal_and_budgeted():
         assert stats.elapsed <= dt
     finally:
         sess.close()
+
+
+def test_vote_counts_exposes_summed_visits():
+    sess = _FakeSession()
+    a = _mk_root(sess)
+    b = _mk_root(sess)
+    a.N, a.W = [3, 1], [1.0, 0.5]
+    b.N, b.W = [1, 3], [0.2, 0.4]
+    votes, wsum = M._vote_counts([(a, None), (b, None)])
+    assert votes[(0,)] == 4 and votes[(1,)] == 4
+    assert abs(wsum[(0,)] - 1.2) < 1e-9 and abs(wsum[(1,)] - 0.9) < 1e-9
+    # _vote must agree with the counts it is built on
+    assert M._vote([(a, None), (b, None)]) in ((0,), (1,))
+
+
+def test_movestats_has_root_fields_defaulting_none():
+    st = M.MoveStats()
+    assert st.root_actions is None and st.root_visits is None

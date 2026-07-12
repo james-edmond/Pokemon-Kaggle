@@ -40,6 +40,8 @@ class MoveStats:
     sims: int = 0
     elapsed: float = 0.0
     reason: str = ""
+    root_actions: list = None   # candidate pick-tuples (populated iff searched)
+    root_visits: list = None    # summed cross-tree visits, aligned with root_actions
 
 
 class _Node:
@@ -235,8 +237,8 @@ def _simulate(root, me, my_deck, opp_decklist, model, tables, session, gen,
     return True
 
 
-def _vote(roots):
-    """Root pick across trees: max summed visits, ties by mean value."""
+def _vote_counts(roots):
+    """Summed visit and value counters per root pick-tuple across trees."""
     votes, wsum = Counter(), Counter()
     for root, _ in roots:
         if not root.actions:
@@ -244,6 +246,12 @@ def _vote(roots):
         for j, a in enumerate(root.actions):
             votes[a] += root.N[j]
             wsum[a] += root.W[j]
+    return votes, wsum
+
+
+def _vote(roots):
+    """Root pick across trees: max summed visits, ties by mean value."""
+    votes, wsum = _vote_counts(roots)
     if not votes:
         return None
     return max(votes, key=lambda a: (votes[a],
@@ -310,10 +318,14 @@ def search_move(obs, me, my_deck, tracker, model, tables, session, cfg, rng,
         if stats.sims == 0:
             stats.reason = "no-sims"
             return None, stats
-        best = _vote(roots)
-        if best is None:
+        votes, wsum = _vote_counts(roots)
+        if not votes:
             stats.reason = "no-vote"
             return None, stats
+        stats.root_actions = list(votes.keys())
+        stats.root_visits = [int(votes[a]) for a in stats.root_actions]
+        best = max(votes, key=lambda a: (votes[a],
+                                         wsum[a] / votes[a] if votes[a] else float("-inf")))
         stats.searched = True
         return list(best), stats
     except Exception:
