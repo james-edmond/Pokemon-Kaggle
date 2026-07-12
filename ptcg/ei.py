@@ -115,3 +115,111 @@ def single_pick_loss(policy, steps, zs, opp_decks, tables, cfg,
         loss = loss + cfg.kl_coef * kl
         parts["kl"] = float(kl)
     return loss, parts
+
+
+def multi_pick_loss(policy, step, z, opp_deck, tables, cfg):
+    """-sum(pi_a * logprob(sequence a)) for one multi-pick state, plus
+    value/aux on the same trunk (row 0)."""
+    from .model import collate_selects, collate_states
+    from .replay import batched_replay
+    dev = torch.device(cfg.device)
+    n = len(step.actions)
+    sb = {k: v.to(dev) for k, v in collate_states(
+        [step.state] * n).items()}
+    selb = {k: v.to(dev) for k, v in collate_selects(
+        [step.esel] * n).items()}
+    trunk = policy.encode(sb)
+    logp, _ = batched_replay(policy, trunk, sb, selb,
+                             [list(a) for a in step.actions])
+    w = torch.tensor([float(v) for v in step.visits], device=dev)
+    if cfg.pi_temp != 1.0:
+        w = w.clamp(min=1e-9) ** (1.0 / cfg.pi_temp)
+    pi = w / w.sum()
+    loss_pi = -(pi * logp).sum()
+    v = policy.public_value(trunk[0:1])
+    loss_v = (v - torch.tensor([z], device=dev)) ** 2
+    loss_aux = _aux_loss(policy, trunk[0:1], [step], [opp_deck], tables, dev)
+    loss = loss_pi + cfg.vf_coef * loss_v.mean() + cfg.aux_coef * loss_aux
+    return loss, {"loss_pi": float(loss_pi), "loss_v": float(loss_v.mean()),
+                  "loss_aux": float(loss_aux)}
+
+
+def value_only_loss(policy, steps, zs, opp_decks, tables, cfg):
+    """Value + aux losses for states without a policy target."""
+    from .model import collate_states
+    dev = torch.device(cfg.device)
+    sb = {k: v.to(dev) for k, v in collate_states(
+        [s.state for s in steps]).items()}
+    trunk = policy.encode(sb)
+    v = policy.public_value(trunk)
+    z_t = torch.tensor(zs, dtype=torch.float32, device=dev)
+    loss_v = ((v - z_t) ** 2).mean()
+    loss_aux = _aux_loss(policy, trunk, steps, opp_decks, tables, dev)
+    loss = cfg.vf_coef * loss_v + cfg.aux_coef * loss_aux
+    return loss, {"loss_v": float(loss_v), "loss_aux": float(loss_aux)}
+
+
+def train_ei(policy, games, tables, cfg, incumbent=None):
+    """One training pass (cfg.epochs) over the games. Returns metrics."""
+    dev = torch.device(cfg.device)
+    policy.to(dev)
+    policy.train()
+    if incumbent is not None:
+        incumbent.to(dev)
+        incumbent.eval()
+    flat = flatten_games(games)
+    singles = [(s, z, od) for s, z, od in flat
+               if s.actions is not None and is_single_pick(s)]
+    multis = [(s, z, od) for s, z, od in flat
+              if s.actions is not None and not is_single_pick(s)]
+    vonly = [(s, z, od) for s, z, od in flat if s.actions is None]
+    rng = random.Random(cfg.seed)
+    opt = torch.optim.AdamW(policy.parameters(), lr=cfg.lr)
+    agg = {"loss_pi": 0.0, "loss_v": 0.0, "loss_aux": 0.0}
+    n_pi = n_va = 0
+    for _ in range(cfg.epochs):
+        rng.shuffle(singles)
+        rng.shuffle(vonly)
+        for lo in range(0, len(singles), cfg.minibatch):
+            batch = singles[lo:lo + cfg.minibatch]
+            loss, parts = single_pick_loss(
+                policy, [b[0] for b in batch], [b[1] for b in batch],
+                [b[2] for b in batch], tables, cfg, incumbent=incumbent)
+            opt.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(policy.parameters(),
+                                           cfg.grad_clip)
+            opt.step()
+            agg["loss_pi"] += parts["loss_pi"]
+            agg["loss_v"] += parts["loss_v"]
+            agg["loss_aux"] += parts["loss_aux"]
+            n_pi += 1
+            n_va += 1
+        for s, z, od in multis:
+            loss, parts = multi_pick_loss(policy, s, z, od, tables, cfg)
+            opt.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(policy.parameters(),
+                                           cfg.grad_clip)
+            opt.step()
+            agg["loss_pi"] += parts["loss_pi"]
+            n_pi += 1
+        for lo in range(0, len(vonly), cfg.minibatch):
+            batch = vonly[lo:lo + cfg.minibatch]
+            loss, parts = value_only_loss(
+                policy, [b[0] for b in batch], [b[1] for b in batch],
+                [b[2] for b in batch], tables, cfg)
+            opt.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(policy.parameters(),
+                                           cfg.grad_clip)
+            opt.step()
+            agg["loss_v"] += parts["loss_v"]
+            agg["loss_aux"] += parts["loss_aux"]
+            n_va += 1
+    policy.eval()
+    return {"loss_pi": agg["loss_pi"] / max(n_pi, 1),
+            "loss_v": agg["loss_v"] / max(n_va, 1),
+            "loss_aux": agg["loss_aux"] / max(n_va, 1),
+            "n_single": len(singles), "n_multi": len(multis),
+            "n_valueonly": len(vonly), "epochs_ran": cfg.epochs}

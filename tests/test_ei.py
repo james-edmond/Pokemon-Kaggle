@@ -104,3 +104,45 @@ def test_single_pick_loss_decreases_with_training():
     assert last < first, (first, last)
     assert set(parts) >= {"loss_pi", "loss_v", "loss_aux"}
     assert all(math.isfinite(v) for v in parts.values())
+
+
+def test_multi_pick_loss_matches_manual_logprob_weighting():
+    import os
+
+    from ptcg.model import PolicyModel, tiny_config
+    from ptcg.action import replay_logprob
+    from ptcg.ei import multi_pick_loss
+    tables = build_tables()
+    torch.manual_seed(1)
+    net = PolicyModel(tiny_config(tables))
+    g = _fabricated_game(tables)
+    s = next(x for x in g.steps if x.actions and len(x.actions) >= 2)
+    cfg = EIConfig()
+    loss, parts = multi_pick_loss(net, s, 1.0, g.decks[1 - s.player],
+                                  tables, cfg)
+    # manual: -sum(pi_a * logp_a) via the B==1 replay path
+    with torch.no_grad():
+        lps = replay_logprob(net, [s.state] * len(s.actions),
+                             [s.esel] * len(s.actions),
+                             [list(a) for a in s.actions])
+    w = torch.tensor([float(v) for v in s.visits])
+    pi = w / w.sum()
+    manual = -(pi * lps).sum()
+    assert abs(float(parts["loss_pi"]) - float(manual)) < 1e-4
+
+
+def test_train_ei_runs_and_improves_on_fabricated_data():
+    from ptcg.model import PolicyModel, tiny_config
+    from ptcg.ei import train_ei
+    tables = build_tables()
+    torch.manual_seed(2)
+    net = PolicyModel(tiny_config(tables))
+    games = [_fabricated_game(tables) for _ in range(2)]
+    cfg = EIConfig(lr=3e-3, epochs=4, minibatch=8, device="cpu", seed=0)
+    m1 = train_ei(net, games, tables, cfg)
+    m2 = train_ei(net, games, tables, cfg)
+    assert m2["loss_pi"] < m1["loss_pi"]
+    assert m1["n_single"] + m1["n_multi"] + m1["n_valueonly"] == sum(
+        len(g.steps) for g in games)
+    for k in ("loss_pi", "loss_v", "loss_aux"):
+        assert k in m1
